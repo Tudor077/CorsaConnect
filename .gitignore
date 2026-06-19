@@ -1,0 +1,28 @@
+# Rust
+/server/target/
+
+# Android / Gradle
+/android/.gradle/
+/android/build/
+/android/app/build/
+/android/local.properties
+/android/.idea/
+/android/captures/
+*.iml
+
+# Build artifacts shipped via GitHub Releases, not committed
+/dist/
+
+# Local tooling, not for the public repo
+/.claude/
+
+# Misc
+/server/diag.log
+/android/app/local.properties
+/tools/launcher_shot.png
+/tools/page_shot.png
+__pycache__/
+
+# OS
+Thumbs.db
+.DS_Store
