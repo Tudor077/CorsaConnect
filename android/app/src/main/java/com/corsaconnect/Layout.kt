@@ -33,6 +33,7 @@ data class Element(
     val h: Float,
     val label: String = "",
     val button: Int = 0,       // XInput mask, for BUTTON
+    val button2: Int = 0,      // optional second XInput mask, pressed together (combo)
     val momentary: Boolean = true, // BUTTON: hold vs toggle
     val shift: Boolean = false, // BUTTON: a gear-shift, so grind feedback applies
 ) {
@@ -45,6 +46,7 @@ data class Element(
         put("h", h.toDouble())
         put("label", label)
         put("button", button)
+        put("button2", button2)
         put("momentary", momentary)
         put("shift", shift)
     }
@@ -59,6 +61,7 @@ data class Element(
             h = o.getDouble("h").toFloat(),
             label = o.optString("label", ""),
             button = o.optInt("button", 0),
+            button2 = o.optInt("button2", 0),
             momentary = o.optBoolean("momentary", true),
             shift = o.optBoolean("shift", false),
         )

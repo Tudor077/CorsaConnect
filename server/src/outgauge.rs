@@ -53,3 +53,4 @@ pub fn parse(buf: &[u8]) -> Option<TelemetryPacket> {
         ..Default::default()
     })
 }
+

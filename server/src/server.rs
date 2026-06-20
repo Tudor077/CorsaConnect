@@ -271,8 +271,16 @@ fn telemetry_relay(
 
     let mut buf = [0u8; 128];
     let mut announced = false;
-    // Learned per car: the highest rpm seen (~the rev limiter / redline).
+    // Redline = the rev limiter, found as the rpm where flat-out the engine stops
+    // climbing (the rev cut). Until then the tach stays large with no red zone, so
+    // a fresh car looks normal at idle instead of pinning the needle to a tiny
+    // redline; once the limiter is learned the gauge shrinks down to it.
+    // BeamNG's OutGauge has no per-car id (`car` is always "beam") and never sets
+    // the shift-light bit, so a pause in the stream is our only "car changed" cue.
     let mut peak_rpm = 0.0f32;
+    let mut frames_since_peak = 0u32;
+    let mut limiter = 0.0f32;
+    let mut idle_ticks = 0u32;
     while !stop.load(Ordering::Relaxed) {
         let (n, _) = match sock.recv_from(&mut buf) {
             Ok(v) => v,
@@ -280,10 +288,13 @@ fn telemetry_relay(
                 if e.kind() == std::io::ErrorKind::WouldBlock
                     || e.kind() == std::io::ErrorKind::TimedOut =>
             {
+                idle_ticks += 1;
                 continue;
             }
             Err(_) => continue,
         };
+        let gap = idle_ticks;
+        idle_ticks = 0;
         let Some(mut tel) = outgauge::parse(&buf[..n]) else {
             if !announced {
                 shared.log(format!(
@@ -306,15 +317,39 @@ fn telemetry_relay(
         tel.slip = slip;
         tel.impact = impact;
 
-        // Learn the car's rev range so the tach can auto-fit. The redline (red
-        // zone) starts at the rev limiter, i.e. the highest rpm the car reaches;
-        // the gauge gets a little headroom above so the needle can swing into it.
+        // A long pause in the stream (radial menu, vehicle spawn, world reload)
+        // usually means a possible car change - relearn the rev range. gap counts
+        // 250 ms read timeouts, so >=6 is ~1.5 s of silence.
+        if gap >= 6 && (peak_rpm > 0.0 || limiter > 0.0) {
+            peak_rpm = 0.0;
+            limiter = 0.0;
+            frames_since_peak = 0;
+            shared.log("Telemetry resumed - relearning rev range.");
+        }
+
+        // Track the peak rpm and how long since it last rose.
         if tel.rpm > peak_rpm {
             peak_rpm = tel.rpm;
+            frames_since_peak = 0;
+            if peak_rpm > limiter + 100.0 {
+                limiter = 0.0; // revved past the supposed limiter -> relearn higher
+            }
+        } else {
+            frames_since_peak = frames_since_peak.saturating_add(1);
         }
-        if peak_rpm > 1000.0 {
-            tel.redline = peak_rpm;
-            tel.max_rpm = peak_rpm * 1.08;
+        // Rev limiter: flat-out, high rpm, and the peak hasn't moved for a moment.
+        if limiter == 0.0 && tel.throttle > 0.85 && peak_rpm > 3000.0 && frames_since_peak >= 30 {
+            limiter = peak_rpm;
+            shared.log(format!("Redline learned: {:.0} rpm.", limiter));
+        }
+
+        // Big gauge with no red until the limiter is known; then shrink to it.
+        if limiter > 0.0 {
+            tel.redline = limiter;
+            tel.max_rpm = limiter * 1.08;
+        } else {
+            tel.max_rpm = 9000.0f32.max(peak_rpm * 1.05);
+            tel.redline = tel.max_rpm;
         }
         if let Some(addr) = *phone_addr.lock().unwrap() {
             let _ = tx.send_to(&tel.encode(), addr);

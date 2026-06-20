@@ -63,35 +63,23 @@ fun Gauge(
                 size = arcSize,
                 style = Stroke(width = stroke, cap = StrokeCap.Round),
             )
-            // Redline tail.
-            if (redlineFrac < 1f) {
-                drawArc(
-                    color = Color(0xFF7A1F1F),
-                    startAngle = START_ANGLE + SWEEP * redlineFrac,
-                    sweepAngle = SWEEP * (1f - redlineFrac),
-                    useCenter = false,
-                    topLeft = topLeft,
-                    size = arcSize,
-                    style = Stroke(width = stroke, cap = StrokeCap.Round),
-                )
-            }
-            // Filled value (capped at the redline; the part beyond is painted red).
-            val fillFrac = if (redlineFrac < 1f) frac.coerceAtMost(redlineFrac) else frac
+            // Progress fill (the rpm bar) runs the whole way, under the redline.
             drawArc(
                 color = accent,
                 startAngle = START_ANGLE,
-                sweepAngle = SWEEP * fillFrac,
+                sweepAngle = SWEEP * frac,
                 useCenter = false,
                 topLeft = topLeft,
                 size = arcSize,
                 style = Stroke(width = stroke, cap = StrokeCap.Round),
             )
-            // Value past the redline glows red.
-            if (redlineFrac < 1f && frac > redlineFrac) {
+            // Redline zone: a translucent red overlay drawn on top, so the rpm bar
+            // shows through it.
+            if (redlineFrac < 1f) {
                 drawArc(
-                    color = Color(0xFFE53935),
+                    color = Color(0x99E53935),
                     startAngle = START_ANGLE + SWEEP * redlineFrac,
-                    sweepAngle = SWEEP * (frac - redlineFrac),
+                    sweepAngle = SWEEP * (1f - redlineFrac),
                     useCenter = false,
                     topLeft = topLeft,
                     size = arcSize,
@@ -176,32 +164,22 @@ fun DigitalGauge(
                         strokeWidth = h,
                         cap = StrokeCap.Round,
                     )
-                    // Redline zone.
-                    if (redlineFrac < 1f) {
-                        drawLine(
-                            color = Color(0xFF7A1F1F),
-                            start = Offset(size.width * redlineFrac, h / 2),
-                            end = Offset(size.width, h / 2),
-                            strokeWidth = h,
-                            cap = StrokeCap.Round,
-                        )
-                    }
-                    // Fill up to value.
-                    val fillFrac = if (redlineFrac < 1f) frac.coerceAtMost(redlineFrac) else frac
-                    if (fillFrac > 0f) {
+                    // Progress fill (rpm) runs the whole way, under the redline.
+                    if (frac > 0f) {
                         drawLine(
                             color = accent,
                             start = Offset(0f, h / 2),
-                            end = Offset(size.width * fillFrac, h / 2),
+                            end = Offset(size.width * frac, h / 2),
                             strokeWidth = h,
                             cap = StrokeCap.Round,
                         )
                     }
-                    if (overRedline) {
+                    // Redline zone: translucent red overlay on top.
+                    if (redlineFrac < 1f) {
                         drawLine(
-                            color = Color(0xFFE53935),
+                            color = Color(0x99E53935),
                             start = Offset(size.width * redlineFrac, h / 2),
-                            end = Offset(size.width * frac, h / 2),
+                            end = Offset(size.width, h / 2),
                             strokeWidth = h,
                             cap = StrokeCap.Round,
                         )

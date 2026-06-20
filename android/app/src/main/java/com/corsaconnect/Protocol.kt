@@ -111,4 +111,8 @@ object XInput {
     )
 
     fun nameOf(mask: Int): String = named.firstOrNull { it.second == mask }?.first ?: "—"
+
+    /** Display name for a button, plus a second one if it's a combo (a+b). */
+    fun comboName(a: Int, b: Int): String =
+        if (b != 0) "${nameOf(a)}+${nameOf(b)}" else nameOf(a)
 }

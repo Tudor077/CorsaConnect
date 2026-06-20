@@ -4,10 +4,12 @@ import android.os.Bundle
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectDragGestures
@@ -27,6 +29,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
 import kotlin.math.roundToInt
+
+/** Edit-mode snap grid: number of square cells down the screen height. */
+private const val GRID_ROWS = 22
 
 class MainActivity : ComponentActivity() {
 
@@ -171,6 +176,40 @@ class MainActivity : ComponentActivity() {
                 val fullW = maxWidth
                 val fullH = maxHeight
 
+                // Square snap grid: a cell is the same size in px on both axes, so
+                // the x step (fraction of width) and y step (fraction of height)
+                // differ by the screen's aspect ratio.
+                val cellPx = pxH / GRID_ROWS
+                val gFx = cellPx / pxW
+                val gFy = cellPx / pxH
+                fun snapX(v: Float) = (v / gFx).roundToInt() * gFx
+                fun snapY(v: Float) = (v / gFy).roundToInt() * gFy
+
+                // --- Tap empty space to deselect / close the panel ---
+                if (editMode) {
+                    Box(
+                        Modifier.fillMaxSize().pointerInput(Unit) {
+                            detectTapGestures(onTap = { selected = null })
+                        },
+                    )
+                }
+
+                // --- Snap grid (edit mode) ---
+                if (editMode) {
+                    Canvas(Modifier.fillMaxSize()) {
+                        var gx = 0f
+                        while (gx <= size.width) {
+                            drawLine(Color(0x22FFFFFF), Offset(gx, 0f), Offset(gx, size.height), 1f)
+                            gx += cellPx
+                        }
+                        var gy = 0f
+                        while (gy <= size.height) {
+                            drawLine(Color(0x22FFFFFF), Offset(0f, gy), Offset(size.width, gy), 1f)
+                            gy += cellPx
+                        }
+                    }
+                }
+
                 // --- Elements ---
                 elements.forEach { el ->
                     key(el.id) {
@@ -189,7 +228,18 @@ class MainActivity : ComponentActivity() {
                                             detectTapGestures(onTap = { selected = el })
                                         }
                                         .pointerInput(el.id) {
-                                            detectDragGestures { _, drag ->
+                                            detectDragGestures(
+                                                onDragEnd = {
+                                                    update(el.id) {
+                                                        it.copy(
+                                                            x = snapX(it.x).coerceIn(0f, 1f - it.w),
+                                                            y = snapY(it.y).coerceIn(0f, 1f - it.h),
+                                                        )
+                                                    }
+                                                    selected = elements.firstOrNull { it.id == el.id }
+                                                    persist()
+                                                },
+                                            ) { _, drag ->
                                                 update(el.id) {
                                                     it.copy(
                                                         x = (it.x + drag.x / pxW).coerceIn(0f, 1f - it.w),
@@ -214,7 +264,17 @@ class MainActivity : ComponentActivity() {
                                         .clip(RoundedCornerShape(6.dp))
                                         .background(Color(0xFF4C8DFF))
                                         .pointerInput(el.id) {
-                                            detectDragGestures { _, drag ->
+                                            detectDragGestures(
+                                                onDragEnd = {
+                                                    update(el.id) {
+                                                        it.copy(
+                                                            w = snapX(it.w).coerceIn(gFx, 1f - it.x),
+                                                            h = snapY(it.h).coerceIn(gFy, 1f - it.y),
+                                                        )
+                                                    }
+                                                    persist()
+                                                },
+                                            ) { _, drag ->
                                                 update(el.id) {
                                                     it.copy(
                                                         w = (it.w + drag.x / pxW).coerceIn(0.05f, 1f - it.x),
@@ -255,17 +315,31 @@ class MainActivity : ComponentActivity() {
                 // --- Selected element config (edit mode) ---
                 selected?.let { sel ->
                     if (editMode) {
+                        // Dock the panel on the side away from the element so it
+                        // stays visible: element on the right half -> panel left.
+                        val panelLeft = (sel.x + sel.w / 2f) > 0.5f
                         ElementConfigSheet(
                             element = sel,
+                            onLeft = panelLeft,
                             onChange = { transform ->
                                 update(sel.id, transform)
                                 selected = elements.firstOrNull { it.id == sel.id }
+                            },
+                            onCopy = {
+                                val dup = sel.copy(
+                                    id = "el-" + java.util.UUID.randomUUID().toString().take(6),
+                                    x = snapX(sel.x + gFx).coerceIn(0f, 1f - sel.w),
+                                    y = snapY(sel.y + gFy).coerceIn(0f, 1f - sel.h),
+                                )
+                                elements.add(dup); selected = dup; persist()
                             },
                             onDelete = {
                                 elements.removeAll { it.id == sel.id }; selected = null; persist()
                             },
                             onClose = { selected = null; persist() },
-                            modifier = Modifier.align(Alignment.BottomCenter),
+                            modifier = Modifier.align(
+                                if (panelLeft) Alignment.CenterStart else Alignment.CenterEnd,
+                            ),
                         )
                     }
                 }
@@ -341,16 +415,17 @@ class MainActivity : ComponentActivity() {
     private fun XButton(el: Element, enabled: Boolean) {
         var toggled by remember(el.id) { mutableStateOf(false) }
         val active = toggled
+        val mask = el.button or el.button2 // press both at once for a combo
         PedalButton(
-            label = el.label.ifBlank { XInput.nameOf(el.button) },
+            label = el.label.ifBlank { XInput.comboName(el.button, el.button2) },
             color = if (active) Color(0xFF3A5A8A) else Color(0xFF2A2A33),
             enabled = enabled,
         ) { pressed ->
             if (el.momentary) {
-                buttonsState = if (pressed) buttonsState or el.button else buttonsState and el.button.inv()
+                buttonsState = if (pressed) buttonsState or mask else buttonsState and mask.inv()
             } else if (pressed) {
                 toggled = !toggled
-                buttonsState = if (toggled) buttonsState or el.button else buttonsState and el.button.inv()
+                buttonsState = if (toggled) buttonsState or mask else buttonsState and mask.inv()
             }
         }
     }
@@ -668,60 +743,117 @@ private fun EditBar(
 @Composable
 private fun ElementConfigSheet(
     element: Element,
+    onLeft: Boolean,
     onChange: ((Element) -> Element) -> Unit,
+    onCopy: () -> Unit,
     onDelete: () -> Unit,
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     var bindMenu by remember { mutableStateOf(false) }
+    var bind2Menu by remember { mutableStateOf(false) }
+    // Docked side panel: keeps the dashboard visible while you edit. Rounded on
+    // the inner edge, square against the screen edge it's docked to.
+    val shape = if (onLeft) {
+        RoundedCornerShape(topEnd = 16.dp, bottomEnd = 16.dp)
+    } else {
+        RoundedCornerShape(topStart = 16.dp, bottomStart = 16.dp)
+    }
     Surface(
-        modifier.fillMaxWidth(),
+        modifier.fillMaxHeight().width(220.dp),
         color = Color(0xF015151B),
-        shape = RoundedCornerShape(topStart = 14.dp, topEnd = 14.dp),
+        shape = shape,
     ) {
-        Row(
-            Modifier.padding(12.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text(element.type.name, color = Color(0xFF8A8A95), fontSize = 12.sp)
-            if (element.type == ControlType.BUTTON) {
-                OutlinedTextField(
-                    value = element.label,
-                    onValueChange = { v -> onChange { it.copy(label = v) } },
-                    label = { Text("Label", fontSize = 11.sp) },
-                    singleLine = true,
-                    modifier = Modifier.width(150.dp),
+        Column(Modifier.fillMaxHeight().padding(14.dp)) {
+            Column(
+                Modifier.weight(1f).verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Text(
+                    element.type.name.replace('_', ' '),
+                    color = Color.White,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Bold,
                 )
-                Box {
-                    OutlinedButton(onClick = { bindMenu = true }) {
-                        Text("Bind: ${XInput.nameOf(element.button)}")
-                    }
-                    DropdownMenu(expanded = bindMenu, onDismissRequest = { bindMenu = false }) {
-                        XInput.named.forEach { (name, mask) ->
-                            DropdownMenuItem(
-                                text = { Text(name) },
-                                onClick = { onChange { it.copy(button = mask) }; bindMenu = false },
-                            )
+                if (element.type == ControlType.BUTTON) {
+                    OutlinedTextField(
+                        value = element.label,
+                        onValueChange = { v -> onChange { it.copy(label = v) } },
+                        label = { Text("Label", fontSize = 11.sp) },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+
+                    SectionLabel("INPUT")
+                    Box(Modifier.fillMaxWidth()) {
+                        OutlinedButton(
+                            onClick = { bindMenu = true },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) { Text("Bind: ${XInput.nameOf(element.button)}") }
+                        DropdownMenu(expanded = bindMenu, onDismissRequest = { bindMenu = false }) {
+                            XInput.named.forEach { (name, mask) ->
+                                DropdownMenuItem(
+                                    text = { Text(name) },
+                                    onClick = { onChange { it.copy(button = mask) }; bindMenu = false },
+                                )
+                            }
                         }
                     }
+                    // Optional second input pressed at the same time (modifier + key).
+                    Box(Modifier.fillMaxWidth()) {
+                        OutlinedButton(
+                            onClick = { bind2Menu = true },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) { Text("+ ${if (element.button2 != 0) XInput.nameOf(element.button2) else "None"}") }
+                        DropdownMenu(expanded = bind2Menu, onDismissRequest = { bind2Menu = false }) {
+                            DropdownMenuItem(
+                                text = { Text("None") },
+                                onClick = { onChange { it.copy(button2 = 0) }; bind2Menu = false },
+                            )
+                            XInput.named.forEach { (name, mask) ->
+                                DropdownMenuItem(
+                                    text = { Text(name) },
+                                    onClick = { onChange { it.copy(button2 = mask) }; bind2Menu = false },
+                                )
+                            }
+                        }
+                    }
+
+                    SectionLabel("BEHAVIOUR")
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        FilterChip(
+                            selected = !element.momentary,
+                            onClick = { onChange { it.copy(momentary = !it.momentary) } },
+                            label = { Text(if (element.momentary) "Hold" else "Toggle") },
+                        )
+                        FilterChip(
+                            selected = element.shift,
+                            onClick = { onChange { it.copy(shift = !it.shift) } },
+                            label = { Text("Shift") },
+                        )
+                    }
                 }
-                FilterChip(
-                    selected = !element.momentary,
-                    onClick = { onChange { it.copy(momentary = !it.momentary) } },
-                    label = { Text(if (element.momentary) "Hold" else "Toggle") },
-                )
-                FilterChip(
-                    selected = element.shift,
-                    onClick = { onChange { it.copy(shift = !it.shift) } },
-                    label = { Text("Shift") },
-                )
             }
-            Spacer(Modifier.weight(1f))
-            TextButton(onClick = onDelete) { Text("Delete", color = Color(0xFFFF6B6B)) }
-            Button(onClick = onClose) { Text("OK") }
+
+            HorizontalDivider(Modifier.padding(vertical = 8.dp), color = Color(0xFF2A2A33))
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                TextButton(onClick = onCopy) { Text("Copy", color = Color(0xFF4C8DFF)) }
+                TextButton(onClick = onDelete) { Text("Delete", color = Color(0xFFFF6B6B)) }
+            }
+            Button(onClick = onClose, modifier = Modifier.fillMaxWidth()) {
+                Text("Done", maxLines = 1)
+            }
         }
     }
+}
+
+@Composable
+private fun SectionLabel(text: String) {
+    Text(text, color = Color(0xFF6A6A75), fontSize = 11.sp, fontWeight = FontWeight.Bold)
 }
 
 @Composable
