@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use eframe::egui::{self, Color32, FontId, RichText};
 
-use crate::server::{self, Shared};
+use crate::server::{self, Game, Shared};
 
 const BG: Color32 = Color32::from_rgb(14, 14, 18);
 const CARD: Color32 = Color32::from_rgb(24, 24, 31);
@@ -62,6 +62,7 @@ struct App {
     stop: Arc<AtomicBool>,
     running: bool,
     ip: String,
+    game: Game,
 }
 
 impl App {
@@ -73,6 +74,7 @@ impl App {
             ip: server::local_ipv4()
                 .map(|a| a.to_string())
                 .unwrap_or_else(|| "not on a network".to_string()),
+            game: Game::BeamNg,
         }
     }
 
@@ -80,7 +82,8 @@ impl App {
         self.stop.store(false, Ordering::Relaxed);
         let shared = Arc::clone(&self.shared);
         let stop = Arc::clone(&self.stop);
-        std::thread::spawn(move || server::run(shared, stop));
+        let game = self.game;
+        std::thread::spawn(move || server::run(shared, stop, game));
         self.running = true;
     }
 
@@ -129,6 +132,25 @@ impl eframe::App for App {
                         .size(12.0)
                         .color(MUTED),
                 );
+            });
+
+            ui.add_space(12.0);
+
+            // --- Game picker ---
+            frame_card(ui, |ui| {
+                ui.label(RichText::new("GAME").size(12.0).color(MUTED));
+                ui.add_space(4.0);
+                ui.add_enabled_ui(!self.running, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        for g in Game::ALL {
+                            if ui.selectable_label(self.game == g, g.name()).clicked() {
+                                self.game = g;
+                            }
+                        }
+                    });
+                });
+                ui.add_space(4.0);
+                ui.label(RichText::new(self.game.hint()).size(11.0).color(MUTED));
             });
 
             ui.add_space(12.0);

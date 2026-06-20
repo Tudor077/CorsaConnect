@@ -128,9 +128,49 @@ pub fn local_ipv4() -> Option<Ipv4Addr> {
     }
 }
 
+/// The game we're feeding. The virtual controller (steering, pedals, buttons)
+/// works for every game; the choice only decides where dashboard + force
+/// feedback telemetry is read from.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Game {
+    BeamNg,
+    TruckSim, // ETS2 / ATS
+    Wrc10,
+}
+
+impl Game {
+    pub const ALL: [Game; 3] = [Game::BeamNg, Game::TruckSim, Game::Wrc10];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Game::BeamNg => "BeamNG.drive",
+            Game::TruckSim => "Euro / American Truck Sim",
+            Game::Wrc10 => "WRC 10",
+        }
+    }
+
+    /// One-line setup hint shown under the picker.
+    pub fn hint(self) -> &'static str {
+        match self {
+            Game::BeamNg => {
+                "Options > Other > Protocols: enable OutGauge (127.0.0.1:4444) and \
+                 MotionSim/OutSim (4445)."
+            }
+            Game::TruckSim => {
+                "Drop the scs-sdk-plugin DLL into the game's bin\\win_x64\\plugins folder. \
+                 (Dashboard telemetry coming soon; the wheel already works.)"
+            }
+            Game::Wrc10 => {
+                "Dashboard telemetry coming soon; steering and pedals already work via the \
+                 virtual controller."
+            }
+        }
+    }
+}
+
 /// Run the server until `stop` is set. Reports progress/errors via `shared`.
 /// Returns when the input loop ends (stop requested or a fatal error).
-pub fn run(shared: Arc<Shared>, stop: Arc<AtomicBool>) {
+pub fn run(shared: Arc<Shared>, stop: Arc<AtomicBool>, game: Game) {
     shared.set_status(|s| {
         *s = Status::default();
     });
@@ -161,19 +201,28 @@ pub fn run(shared: Arc<Shared>, stop: Arc<AtomicBool>) {
     // Where to send telemetry, learned from the phone's first input packet.
     let phone_addr: Arc<Mutex<Option<SocketAddr>>> = Arc::new(Mutex::new(None));
 
-    // OutGauge -> phone relay thread.
-    let relay = {
-        let shared = Arc::clone(&shared);
-        let stop = Arc::clone(&stop);
-        let phone_addr = Arc::clone(&phone_addr);
-        std::thread::spawn(move || telemetry_relay(shared, stop, phone_addr))
-    };
-
-    // MotionSim listener: derives slide + crash and feeds the relay.
-    let motion = {
-        let shared = Arc::clone(&shared);
-        let stop = Arc::clone(&stop);
-        std::thread::spawn(move || motion_listener(shared, stop))
+    // Telemetry (dashboard + force feedback) is currently wired for BeamNG only.
+    // Other games still get the full virtual controller; their telemetry parsers
+    // are added one at a time.
+    let (relay, motion) = if game == Game::BeamNg {
+        let relay = {
+            let shared = Arc::clone(&shared);
+            let stop = Arc::clone(&stop);
+            let phone_addr = Arc::clone(&phone_addr);
+            std::thread::spawn(move || telemetry_relay(shared, stop, phone_addr))
+        };
+        let motion = {
+            let shared = Arc::clone(&shared);
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || motion_listener(shared, stop))
+        };
+        (Some(relay), Some(motion))
+    } else {
+        shared.log(format!(
+            "{}: wheel, pedals and buttons are live. Dashboard/feedback telemetry isn't wired for this game yet.",
+            game.name()
+        ));
+        (None, None)
     };
 
     if let Err(e) = input_loop(&shared, &stop, &mut pad, &phone_addr) {
@@ -182,8 +231,12 @@ pub fn run(shared: Arc<Shared>, stop: Arc<AtomicBool>) {
         shared.set_status(|s| s.error = Some(msg));
     }
 
-    let _ = relay.join();
-    let _ = motion.join();
+    if let Some(relay) = relay {
+        let _ = relay.join();
+    }
+    if let Some(motion) = motion {
+        let _ = motion.join();
+    }
     // Dropping `pad` here unplugs the virtual controller.
     shared.set_status(|s| {
         s.vigem_ok = false;
