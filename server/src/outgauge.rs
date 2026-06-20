@@ -49,5 +49,7 @@ pub fn parse(buf: &[u8]) -> Option<TelemetryPacket> {
         fuel: f32_at(28),
         throttle: f32_at(48),
         brake: f32_at(52),
+        // Filled in by the relay from MotionSim / learned RPM range.
+        ..Default::default()
     })
 }

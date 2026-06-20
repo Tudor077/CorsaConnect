@@ -34,6 +34,7 @@ data class Element(
     val label: String = "",
     val button: Int = 0,       // XInput mask, for BUTTON
     val momentary: Boolean = true, // BUTTON: hold vs toggle
+    val shift: Boolean = false, // BUTTON: a gear-shift, so grind feedback applies
 ) {
     fun toJson(): JSONObject = JSONObject().apply {
         put("id", id)
@@ -45,6 +46,7 @@ data class Element(
         put("label", label)
         put("button", button)
         put("momentary", momentary)
+        put("shift", shift)
     }
 
     companion object {
@@ -58,6 +60,7 @@ data class Element(
             label = o.optString("label", ""),
             button = o.optInt("button", 0),
             momentary = o.optBoolean("momentary", true),
+            shift = o.optBoolean("shift", false),
         )
 
         fun newOf(type: ControlType): Element {
@@ -81,6 +84,24 @@ data class Element(
     }
 }
 
+/** A named, saveable HUD layout the user can switch between. */
+data class LayoutPreset(val name: String, val elements: List<Element>) {
+    fun toJson(): JSONObject = JSONObject().apply {
+        put("name", name)
+        put("elements", JSONArray().apply { elements.forEach { put(it.toJson()) } })
+    }
+
+    companion object {
+        fun fromJson(o: JSONObject): LayoutPreset {
+            val arr = o.getJSONArray("elements")
+            return LayoutPreset(
+                o.getString("name"),
+                (0 until arr.length()).map { Element.fromJson(arr.getJSONObject(it)) },
+            )
+        }
+    }
+}
+
 /** The whole HUD plus steering tuning and the saved server IP. */
 data class Config(
     val serverIp: String = "192.168.1.141",
@@ -90,10 +111,33 @@ data class Config(
     val maxSpeed: Float = 260f,
     val maxRpm: Float = 8000f,
     val redlineRpm: Float = 6500f,      // where the rpm gauge turns red; match BeamNG per car
+    val autoRpm: Boolean = true,        // auto-fit tach max/redline to the car (learned)
+    // Which preset is active: "manual", "automatic", or a saved custom name.
+    val activePreset: String = "manual",
+    val presets: List<LayoutPreset> = emptyList(), // user-saved custom layouts
     val speedoDigital: Boolean = false, // false = analog gauge, true = digital number
     val tachoDigital: Boolean = false,
+    // Force-feedback (vibration). See [HapticSettings].
+    val haptics: Boolean = true,
+    val hapticIntensity: Float = 1f,     // master 0..1
+    val hapticIgnition: Boolean = true,  // starter rattle when the engine catches
+    val hapticShift: Boolean = true,     // knock on gear change
+    val hapticGrind: Boolean = true,     // buzz when shifting without clutch
+    val hapticDrift: Boolean = true,     // rumble while sliding (real slip)
+    val hapticCollision: Boolean = true, // jolt on impact
     val elements: List<Element>,
 ) {
+    /** The vibration channels, shaped for [HapticsEngine]. */
+    fun hapticSettings() = HapticSettings(
+        enabled = haptics,
+        intensity = hapticIntensity,
+        ignition = hapticIgnition,
+        shift = hapticShift,
+        grind = hapticGrind,
+        drift = hapticDrift,
+        collision = hapticCollision,
+    )
+
     fun toJson(): JSONObject = JSONObject().apply {
         put("serverIp", serverIp)
         put("sensitivity", sensitivity.toDouble())
@@ -102,8 +146,18 @@ data class Config(
         put("maxSpeed", maxSpeed.toDouble())
         put("maxRpm", maxRpm.toDouble())
         put("redlineRpm", redlineRpm.toDouble())
+        put("autoRpm", autoRpm)
+        put("activePreset", activePreset)
+        put("presets", JSONArray().apply { presets.forEach { put(it.toJson()) } })
         put("speedoDigital", speedoDigital)
         put("tachoDigital", tachoDigital)
+        put("haptics", haptics)
+        put("hapticIntensity", hapticIntensity.toDouble())
+        put("hapticIgnition", hapticIgnition)
+        put("hapticShift", hapticShift)
+        put("hapticGrind", hapticGrind)
+        put("hapticDrift", hapticDrift)
+        put("hapticCollision", hapticCollision)
         put("elements", JSONArray().apply { elements.forEach { put(it.toJson()) } })
     }
 
@@ -119,27 +173,49 @@ data class Config(
                 maxSpeed = o.optDouble("maxSpeed", 260.0).toFloat(),
                 maxRpm = o.optDouble("maxRpm", 8000.0).toFloat(),
                 redlineRpm = o.optDouble("redlineRpm", 6500.0).toFloat(),
+                autoRpm = o.optBoolean("autoRpm", true),
+                activePreset = o.optString("activePreset", "manual"),
+                presets = o.optJSONArray("presets")?.let { arr ->
+                    (0 until arr.length()).map { LayoutPreset.fromJson(arr.getJSONObject(it)) }
+                } ?: emptyList(),
                 speedoDigital = o.optBoolean("speedoDigital", false),
                 tachoDigital = o.optBoolean("tachoDigital", false),
+                haptics = o.optBoolean("haptics", true),
+                hapticIntensity = o.optDouble("hapticIntensity", 1.0).toFloat(),
+                hapticIgnition = o.optBoolean("hapticIgnition", true),
+                hapticShift = o.optBoolean("hapticShift", true),
+                hapticGrind = o.optBoolean("hapticGrind", true),
+                hapticDrift = o.optBoolean("hapticDrift", true),
+                hapticCollision = o.optBoolean("hapticCollision", true),
                 elements = els,
             )
         }
 
-        /** The stock layout, mirroring the original fixed HUD. */
-        fun default(): Config = Config(
-            elements = listOf(
-                Element(id("steer"), ControlType.STEERING_BAR, 0.30f, 0.01f, 0.40f, 0.06f),
-                Element(id("speedo"), ControlType.SPEEDOMETER, 0.31f, 0.10f, 0.18f, 0.45f),
-                Element(id("tacho"), ControlType.TACHOMETER, 0.51f, 0.10f, 0.18f, 0.45f),
-                Element(id("gear"), ControlType.GEAR_TEXT, 0.455f, 0.60f, 0.09f, 0.18f),
-                // Three vertical pedal sliders: clutch + brake on the left, throttle on the right.
-                Element(id("clutch"), ControlType.CLUTCH_SLIDER, 0.02f, 0.36f, 0.11f, 0.60f, "CLUTCH"),
-                Element(id("brake"), ControlType.BRAKE_SLIDER, 0.15f, 0.36f, 0.11f, 0.60f, "BRAKE"),
-                Element(id("gas"), ControlType.THROTTLE_SLIDER, 0.87f, 0.36f, 0.11f, 0.60f, "GAS"),
-                Element(id("up"), ControlType.BUTTON, 0.83f, 0.06f, 0.15f, 0.13f, "SHIFT ↑", XInput.RB),
-                Element(id("down"), ControlType.BUTTON, 0.83f, 0.21f, 0.15f, 0.13f, "SHIFT ↓", XInput.LB),
-                Element(id("hand"), ControlType.BUTTON, 0.02f, 0.06f, 0.15f, 0.16f, "HAND", XInput.A),
-            ),
+        /** The stock config: manual layout, gearbox auto-detected. */
+        fun default(): Config = Config(elements = manualLayout())
+
+        /** Gauges, gear, shift buttons and handbrake shared by both layouts. */
+        private fun common(): List<Element> = listOf(
+            Element(id("steer"), ControlType.STEERING_BAR, 0.30f, 0.01f, 0.40f, 0.06f),
+            Element(id("speedo"), ControlType.SPEEDOMETER, 0.31f, 0.10f, 0.18f, 0.45f),
+            Element(id("tacho"), ControlType.TACHOMETER, 0.51f, 0.10f, 0.18f, 0.45f),
+            Element(id("gear"), ControlType.GEAR_TEXT, 0.455f, 0.60f, 0.09f, 0.18f),
+            Element(id("up"), ControlType.BUTTON, 0.83f, 0.06f, 0.15f, 0.13f, "SHIFT ↑", XInput.RB, shift = true),
+            Element(id("down"), ControlType.BUTTON, 0.83f, 0.21f, 0.15f, 0.13f, "SHIFT ↓", XInput.LB, shift = true),
+            Element(id("hand"), ControlType.BUTTON, 0.02f, 0.06f, 0.15f, 0.16f, "HAND", XInput.A),
+        )
+
+        /** Manual gearbox: clutch on the left, brake + throttle on the right. */
+        fun manualLayout(): List<Element> = common() + listOf(
+            Element(id("clutch"), ControlType.CLUTCH_SLIDER, 0.02f, 0.36f, 0.11f, 0.60f, "CLUTCH"),
+            Element(id("brake"), ControlType.BRAKE_SLIDER, 0.74f, 0.36f, 0.11f, 0.60f, "BRAKE"),
+            Element(id("gas"), ControlType.THROTTLE_SLIDER, 0.87f, 0.36f, 0.11f, 0.60f, "GAS"),
+        )
+
+        /** Automatic gearbox: no clutch, brake on the left, throttle on the right. */
+        fun automaticLayout(): List<Element> = common() + listOf(
+            Element(id("brake"), ControlType.BRAKE_SLIDER, 0.02f, 0.36f, 0.11f, 0.60f, "BRAKE"),
+            Element(id("gas"), ControlType.THROTTLE_SLIDER, 0.87f, 0.36f, 0.11f, 0.60f, "GAS"),
         )
 
         private fun id(s: String) = "$s-${UUID.randomUUID().toString().take(4)}"

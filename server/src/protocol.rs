@@ -9,12 +9,16 @@
 //! v2: `buttons` is the raw 16-bit XInput mask chosen by the phone, so the
 //! server just forwards it to the virtual pad and the phone owns the mapping.
 //! v3: adds `clutch`, a third analog pedal mapped to the right-stick Y axis.
+//! v4: telemetry carries `slip` and `impact`, derived from BeamNG MotionSim, so
+//!     the wheel can buzz for real slides and crashes.
+//! v5: telemetry carries learned `max_rpm` and `redline` so the tach auto-fits
+//!     each car.
 
 /// Magic prefix for phone -> server input packets.
 pub const INPUT_MAGIC: &[u8; 2] = b"CC";
 /// Magic prefix for server -> phone telemetry packets.
 pub const TELEMETRY_MAGIC: &[u8; 2] = b"CT";
-pub const PROTO_VERSION: u8 = 3;
+pub const PROTO_VERSION: u8 = 5;
 
 /// Decoded controller input coming from the phone.
 #[derive(Debug, Clone, Copy)]
@@ -62,6 +66,10 @@ pub struct TelemetryPacket {
     pub engine_temp: f32,
     pub throttle: f32, // 0..1
     pub brake: f32,    // 0..1
+    pub slip: f32,     // 0..1 sideways slide, from MotionSim (0 if not enabled)
+    pub impact: f32,   // 0..1 crash strength, decaying, from MotionSim
+    pub max_rpm: f32,  // learned per car (peak rpm seen); 0 until learned
+    pub redline: f32,  // learned per car (shift light, or fraction of max)
 }
 
 impl TelemetryPacket {
@@ -78,6 +86,10 @@ impl TelemetryPacket {
         b.extend_from_slice(&self.engine_temp.to_le_bytes());
         b.extend_from_slice(&self.throttle.to_le_bytes());
         b.extend_from_slice(&self.brake.to_le_bytes());
+        b.extend_from_slice(&self.slip.to_le_bytes());
+        b.extend_from_slice(&self.impact.to_le_bytes());
+        b.extend_from_slice(&self.max_rpm.to_le_bytes());
+        b.extend_from_slice(&self.redline.to_le_bytes());
         b
     }
 }

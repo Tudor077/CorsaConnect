@@ -13,7 +13,8 @@ speed / RPM / gear streamed from the game.
        ▼                                │
 ┌──────────────── PC SERVER (Rust) ─────┴──────────┐
 │  • ViGEmBus: virtual Xbox 360 pad  -> BeamNG     │
-│  • OutGauge UDP :4444  -> parsed -> phone dash    │
+│  • OutGauge  UDP :4444 -> parsed -> phone dash    │
+│  • MotionSim UDP :4445 -> slide + crash -> wheel  │
 └──────────────────────────────────────────────────┘
 ```
 
@@ -45,7 +46,10 @@ cargo run --example test_client
 ## BeamNG setup
 
 Options -> Other -> Protocols:
-- Enable **OutGauge**, set IP `127.0.0.1`, port `4444`.
+- Enable **OutGauge**, set IP `127.0.0.1`, port `4444` (dash: speed, rpm, gear).
+- Enable **MotionSim / OutSim**, set IP `127.0.0.1`, port `4445` (optional, for
+  the wheel to buzz on real slides and crashes). Without it, drift/collision
+  feedback simply stays silent.
 
 Then bind the virtual controller in Options -> Controls (it appears as an Xbox
 360 pad): left stick X = steering, right trigger = throttle, left trigger =

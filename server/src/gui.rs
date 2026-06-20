@@ -158,6 +158,7 @@ impl eframe::App for App {
                 dot_row(ui, "ViGEmBus (virtual controller)", status.vigem_ok);
                 dot_row(ui, "Phone connected", status.phone.is_some());
                 dot_row(ui, "BeamNG telemetry", status.beamng);
+                dot_row(ui, "MotionSim (slide + crash)", status.motion);
                 if let Some((spd, rpm, gear)) = status.last {
                     ui.add_space(2.0);
                     ui.label(
@@ -206,7 +207,8 @@ impl eframe::App for App {
             ui.add_space(8.0);
             ui.label(
                 RichText::new(
-                    "Needs the ViGEmBus driver. In BeamNG enable OutGauge (127.0.0.1:4444).",
+                    "Needs ViGEmBus. In BeamNG enable OutGauge (127.0.0.1:4444) and, for \
+                     slide/crash feedback, MotionSim/OutSim (127.0.0.1:4445).",
                 )
                 .size(11.0)
                 .color(MUTED),

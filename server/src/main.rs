@@ -9,6 +9,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod gui;
+mod motionsim;
 mod outgauge;
 mod protocol;
 mod server;

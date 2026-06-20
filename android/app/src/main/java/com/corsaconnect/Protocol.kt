@@ -11,11 +11,13 @@ import java.nio.ByteOrder
  * controls which controller buttons each on-screen control triggers. The server
  * just forwards the mask to the virtual pad.
  * v3: adds `clutch` as a third analog pedal (maps to the right-stick Y axis).
+ * v4: telemetry adds `slip` and `impact` (slide + crash) from BeamNG MotionSim.
+ * v5: telemetry adds learned `maxRpm` and `redline` so the tach auto-fits the car.
  */
 object Protocol {
     const val INPUT_PORT = 5000
     const val TELEMETRY_PORT = 5001
-    const val VERSION: Byte = 3
+    const val VERSION: Byte = 5
 
     /** Live controller state the phone streams to the server. */
     data class Input(
@@ -50,12 +52,16 @@ object Protocol {
         val engineTemp: Float = 0f,
         val throttle: Float = 0f,
         val brake: Float = 0f,
+        val slip: Float = 0f,   // 0..1 sideways slide (0 if MotionSim is off)
+        val impact: Float = 0f, // 0..1 crash strength, decaying
+        val maxRpm: Float = 0f, // learned rev range (0 until learned)
+        val redline: Float = 0f,
     )
 
     /** Decode a telemetry packet, or null if it isn't one. */
     fun decodeTelemetry(data: ByteArray, len: Int): Telemetry? {
-        // "CT" + version + i8 gear + 7 f32 = 32 bytes
-        if (len < 32 || data[0] != 'C'.code.toByte() || data[1] != 'T'.code.toByte()) return null
+        // "CT" + version + i8 gear + 11 f32 = 48 bytes
+        if (len < 48 || data[0] != 'C'.code.toByte() || data[1] != 'T'.code.toByte()) return null
         if (data[2] != VERSION) return null
         val buf = ByteBuffer.wrap(data, 0, len).order(ByteOrder.LITTLE_ENDIAN)
         buf.position(3)
@@ -67,7 +73,13 @@ object Protocol {
         val engTemp = buf.float
         val throttle = buf.float
         val brake = buf.float
-        return Telemetry(gear, speed, rpm, fuel, turbo, engTemp, throttle, brake)
+        val slip = buf.float
+        val impact = buf.float
+        val maxRpm = buf.float
+        val redline = buf.float
+        return Telemetry(
+            gear, speed, rpm, fuel, turbo, engTemp, throttle, brake, slip, impact, maxRpm, redline,
+        )
     }
 }
 

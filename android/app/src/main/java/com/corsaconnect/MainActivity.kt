@@ -6,6 +6,8 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectDragGestures
@@ -30,12 +32,18 @@ class MainActivity : ComponentActivity() {
 
     private lateinit var steering: SteeringSensor
     private lateinit var store: ConfigStore
+    private lateinit var haptics: HapticsEngine
 
     // Live input the sender thread reads each tick.
     @Volatile private var throttle = 0
     @Volatile private var brake = 0
     @Volatile private var clutch = 0
     @Volatile private var buttonsState = 0
+
+    // For haptics: OR of the masks of buttons flagged as gear shifts, and whether
+    // telemetry is expected to be flowing (i.e. we're connected).
+    @Volatile private var shiftMask = 0
+    @Volatile private var hapticsActive = false
 
     private var network: NetworkService? = null
     private var latestTelemetry by mutableStateOf(Protocol.Telemetry())
@@ -45,6 +53,19 @@ class MainActivity : ComponentActivity() {
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         steering = SteeringSensor(this)
         store = ConfigStore(this)
+        haptics = HapticsEngine(this) {
+            val t = latestTelemetry
+            HapticState(
+                active = hapticsActive,
+                rpm = t.rpm,
+                gear = t.gear,
+                clutch01 = clutch / 255f,
+                throttle01 = throttle / 255f,
+                shiftHeld = shiftMask != 0 && (buttonsState and shiftMask) != 0,
+                slip = t.slip,
+                impact = t.impact,
+            )
+        }
 
         setContent {
             MaterialTheme(colorScheme = darkColorScheme()) {
@@ -55,12 +76,13 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() { super.onResume(); steering.start() }
     override fun onPause() { super.onPause(); steering.stop() }
-    override fun onDestroy() { super.onDestroy(); network?.stop() }
+    override fun onDestroy() { super.onDestroy(); network?.stop(); haptics.stop() }
 
     private fun applyTuning(c: Config) {
         steering.sensitivity = c.sensitivity
         steering.deadZone = c.deadZone
         steering.maxAngleRad = Math.toRadians(c.maxAngleDeg.toDouble()).toFloat()
+        haptics.settings = c.hapticSettings()
     }
 
     private fun connect(ip: String) {
@@ -78,6 +100,14 @@ class MainActivity : ComponentActivity() {
             },
             onTelemetry = { latestTelemetry = it },
         ).also { it.start() }
+        hapticsActive = true
+        haptics.start()
+    }
+
+    private fun disconnect() {
+        hapticsActive = false
+        haptics.stop()
+        network?.stop()
     }
 
     @Composable
@@ -88,11 +118,19 @@ class MainActivity : ComponentActivity() {
         var connected by remember { mutableStateOf(false) }
         var selected by remember { mutableStateOf<Element?>(null) }
         var showSettings by remember { mutableStateOf(false) }
+        var showPresets by remember { mutableStateOf(false) }
         var steerDisplay by remember { mutableStateOf(0f) }
 
         LaunchedEffect(config) { applyTuning(config) }
         LaunchedEffect(Unit) {
             while (true) { steerDisplay = steering.steerNormalized(); delay(33) }
+        }
+        // Keep the set of "shift" button masks current so grind feedback knows
+        // which presses count as a gear change.
+        LaunchedEffect(elements.toList()) {
+            shiftMask = elements
+                .filter { it.type == ControlType.BUTTON && it.shift }
+                .fold(0) { acc, e -> acc or e.button }
         }
 
         fun persist() {
@@ -103,8 +141,30 @@ class MainActivity : ComponentActivity() {
             val i = elements.indexOfFirst { it.id == id }
             if (i >= 0) elements[i] = transform(elements[i])
         }
+        // Swap the live layout to a given element list (does not touch which
+        // preset is "active").
+        fun loadLayout(els: List<Element>) {
+            elements.clear(); elements.addAll(els)
+            config = config.copy(elements = elements.toList()); store.save(config)
+        }
+        // Apply a preset by name and remember it as the active one.
+        fun applyPreset(name: String) {
+            when (name) {
+                "manual" -> loadLayout(Config.manualLayout())
+                "automatic" -> loadLayout(Config.automaticLayout())
+                else -> config.presets.firstOrNull { it.name == name }?.let { loadLayout(it.elements) }
+            }
+            config = config.copy(elements = elements.toList(), activePreset = name)
+            store.save(config)
+        }
 
-        Surface(Modifier.fillMaxSize(), color = Color(0xFF0E0E12)) {
+        if (!connected) {
+            StartScreen(
+                ip = config.serverIp,
+                onIpChange = { config = config.copy(serverIp = it); store.save(config) },
+                onConnect = { connect(config.serverIp); connected = true },
+            )
+        } else Surface(Modifier.fillMaxSize(), color = Color(0xFF0E0E12)) {
             BoxWithConstraints(Modifier.fillMaxSize()) {
                 val pxW = constraints.maxWidth.toFloat()
                 val pxH = constraints.maxHeight.toFloat()
@@ -182,17 +242,13 @@ class MainActivity : ComponentActivity() {
                         modifier = Modifier.align(Alignment.TopCenter),
                     )
                 } else {
-                    DriveBar(
-                        serverIp = config.serverIp,
-                        onIpChange = { config = config.copy(serverIp = it); store.save(config) },
-                        connected = connected,
-                        onConnectToggle = {
-                            if (connected) network?.stop() else connect(config.serverIp)
-                            connected = !connected
-                        },
-                        onCalibrate = { steering.calibrate() },
+                    MenuBar(
+                        onPresets = { showPresets = true },
                         onEdit = { editMode = true },
-                        modifier = Modifier.align(Alignment.TopCenter),
+                        onSettings = { showSettings = true },
+                        onCenter = { steering.calibrate() },
+                        onDisconnect = { disconnect(); connected = false },
+                        modifier = Modifier.align(Alignment.TopStart),
                     )
                 }
 
@@ -201,7 +257,10 @@ class MainActivity : ComponentActivity() {
                     if (editMode) {
                         ElementConfigSheet(
                             element = sel,
-                            onChange = { upd -> update(sel.id) { upd }; selected = upd },
+                            onChange = { transform ->
+                                update(sel.id, transform)
+                                selected = elements.firstOrNull { it.id == sel.id }
+                            },
                             onDelete = {
                                 elements.removeAll { it.id == sel.id }; selected = null; persist()
                             },
@@ -220,6 +279,28 @@ class MainActivity : ComponentActivity() {
                 onClose = { showSettings = false },
             )
         }
+
+        if (showPresets) {
+            PresetsDialog(
+                active = config.activePreset,
+                custom = config.presets,
+                onApply = { applyPreset(it) },
+                onSaveCurrent = { name ->
+                    val preset = LayoutPreset(name, elements.toList())
+                    val others = config.presets.filterNot { it.name == name }
+                    config = config.copy(presets = others + preset, activePreset = name)
+                    store.save(config)
+                },
+                onDelete = { name ->
+                    config = config.copy(
+                        presets = config.presets.filterNot { it.name == name },
+                        activePreset = if (config.activePreset == name) "manual" else config.activePreset,
+                    )
+                    store.save(config)
+                },
+                onClose = { showPresets = false },
+            )
+        }
     }
 
     /** Renders the live content of an element (drive mode wires up interaction). */
@@ -228,7 +309,12 @@ class MainActivity : ComponentActivity() {
         val t = latestTelemetry
         when (el.type) {
             ControlType.SPEEDOMETER -> Speedometer(t.speedKmh, config.maxSpeed, config.speedoDigital)
-            ControlType.TACHOMETER -> Tachometer(t.rpm, config.maxRpm, config.redlineRpm, config.tachoDigital)
+            ControlType.TACHOMETER -> {
+                val auto = config.autoRpm && t.maxRpm > 100f
+                val maxRpm = if (auto) t.maxRpm else config.maxRpm
+                val redline = if (auto && t.redline > 100f) t.redline else config.redlineRpm
+                Tachometer(t.rpm, maxRpm, redline, config.tachoDigital)
+            }
             ControlType.GEAR_TEXT -> Readout(gearLabel(t.gear), "gear", big = true)
             ControlType.SPEED_TEXT -> Readout(t.speedKmh.roundToInt().toString(), "km/h", big = true)
             ControlType.STEERING_BAR -> SteeringBar(steerDisplay)
@@ -391,33 +477,150 @@ private fun VerticalAxis(
     }
 }
 
+/** Landing screen: type the PC's IP and connect. */
 @Composable
-private fun DriveBar(
-    serverIp: String,
-    onIpChange: (String) -> Unit,
-    connected: Boolean,
-    onConnectToggle: () -> Unit,
-    onCalibrate: () -> Unit,
+private fun StartScreen(ip: String, onIpChange: (String) -> Unit, onConnect: () -> Unit) {
+    Surface(Modifier.fillMaxSize(), color = Color(0xFF0E0E12)) {
+        Column(
+            Modifier.fillMaxSize().padding(24.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center,
+        ) {
+            Text("CorsaConnect", color = Color.White, fontSize = 34.sp, fontWeight = FontWeight.Bold)
+            Text(
+                "BeamNG steering wheel",
+                color = Color(0xFF8A8A95),
+                fontSize = 14.sp,
+                modifier = Modifier.padding(bottom = 28.dp),
+            )
+            OutlinedTextField(
+                value = ip,
+                onValueChange = onIpChange,
+                label = { Text("PC IP address") },
+                singleLine = true,
+                modifier = Modifier.width(240.dp),
+            )
+            Spacer(Modifier.height(16.dp))
+            Button(
+                onClick = onConnect,
+                modifier = Modifier.width(240.dp).height(52.dp),
+            ) {
+                Text("Connect", fontSize = 18.sp, fontWeight = FontWeight.Bold)
+            }
+            Text(
+                "Shown on the PC launcher.",
+                color = Color(0xFF6A6A75),
+                fontSize = 12.sp,
+                modifier = Modifier.padding(top = 12.dp),
+            )
+        }
+    }
+}
+
+/** The ≡ menu shown while driving: presets, edit, settings, center, disconnect. */
+@Composable
+private fun MenuBar(
+    onPresets: () -> Unit,
     onEdit: () -> Unit,
+    onSettings: () -> Unit,
+    onCenter: () -> Unit,
+    onDisconnect: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    Row(
-        modifier.fillMaxWidth().padding(8.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        OutlinedTextField(
-            value = serverIp,
-            onValueChange = onIpChange,
-            label = { Text("IP PC", fontSize = 11.sp) },
-            singleLine = true,
-            enabled = !connected,
-            modifier = Modifier.width(170.dp),
-        )
-        Button(onClick = onConnectToggle) { Text(if (connected) "Stop" else "Connect") }
-        OutlinedButton(onClick = onCalibrate) { Text("Center") }
-        Spacer(Modifier.weight(1f))
-        OutlinedButton(onClick = onEdit) { Text("✎ Edit") }
+    var open by remember { mutableStateOf(false) }
+    Box(modifier.padding(8.dp)) {
+        Surface(
+            color = Color(0xCC1C1C24),
+            shape = RoundedCornerShape(10.dp),
+            modifier = Modifier.size(46.dp).pointerInput(Unit) {
+                detectTapGestures(onTap = { open = true })
+            },
+        ) {
+            Box(contentAlignment = Alignment.Center) {
+                Text("☰", color = Color.White, fontSize = 22.sp)
+            }
+        }
+        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            DropdownMenuItem(text = { Text("Presets") }, onClick = { open = false; onPresets() })
+            DropdownMenuItem(text = { Text("Edit layout") }, onClick = { open = false; onEdit() })
+            DropdownMenuItem(text = { Text("Settings") }, onClick = { open = false; onSettings() })
+            DropdownMenuItem(text = { Text("Re-center wheel") }, onClick = { open = false; onCenter() })
+            HorizontalDivider()
+            DropdownMenuItem(
+                text = { Text("Disconnect", color = Color(0xFFFF6B6B)) },
+                onClick = { open = false; onDisconnect() },
+            )
+        }
+    }
+}
+
+/** Pick / save / delete layout presets. */
+@Composable
+private fun PresetsDialog(
+    active: String,
+    custom: List<LayoutPreset>,
+    onApply: (String) -> Unit,
+    onSaveCurrent: (String) -> Unit,
+    onDelete: (String) -> Unit,
+    onClose: () -> Unit,
+) {
+    var newName by remember { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onClose,
+        confirmButton = { Button(onClick = onClose) { Text("Done") } },
+        title = { Text("Presets") },
+        text = {
+            Column(
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+            ) {
+                PresetRow("Manual", active == "manual", onApply = { onApply("manual") })
+                PresetRow("Automatic", active == "automatic", onApply = { onApply("automatic") })
+                if (custom.isNotEmpty()) {
+                    HorizontalDivider(Modifier.padding(vertical = 2.dp))
+                    custom.forEach { p ->
+                        PresetRow(p.name, active == p.name, onApply = { onApply(p.name) }, onDelete = { onDelete(p.name) })
+                    }
+                }
+                HorizontalDivider(Modifier.padding(vertical = 2.dp))
+                Text("Save current layout", fontSize = 12.sp, color = Color(0xFF8A8A95))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedTextField(
+                        value = newName,
+                        onValueChange = { newName = it },
+                        label = { Text("Name", fontSize = 11.sp) },
+                        singleLine = true,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Button(
+                        onClick = { if (newName.isNotBlank()) { onSaveCurrent(newName.trim()); newName = "" } },
+                        enabled = newName.isNotBlank(),
+                    ) { Text("Save") }
+                }
+            }
+        },
+    )
+}
+
+@Composable
+private fun PresetRow(
+    name: String,
+    isActive: Boolean,
+    onApply: () -> Unit,
+    onDelete: (() -> Unit)? = null,
+) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        TextButton(onClick = onApply, modifier = Modifier.weight(1f)) {
+            Text(
+                (if (isActive) "● " else "○ ") + name,
+                color = if (isActive) Color(0xFF4C8DFF) else Color(0xFFD0D0D8),
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+        if (onDelete != null) {
+            TextButton(onClick = onDelete) { Text("✕", color = Color(0xFFFF6B6B)) }
+        }
     }
 }
 
@@ -449,8 +652,6 @@ private fun EditBar(
                     "Gear" to ControlType.GEAR_TEXT,
                     "Speed text" to ControlType.SPEED_TEXT,
                     "Steering bar" to ControlType.STEERING_BAR,
-                    "Gas (button)" to ControlType.GAS,
-                    "Brake (button)" to ControlType.BRAKE,
                 )
                 items.forEach { (name, type) ->
                     DropdownMenuItem(text = { Text(name) }, onClick = { onAdd(type); addMenu = false })
@@ -467,7 +668,7 @@ private fun EditBar(
 @Composable
 private fun ElementConfigSheet(
     element: Element,
-    onChange: (Element) -> Unit,
+    onChange: ((Element) -> Element) -> Unit,
     onDelete: () -> Unit,
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
@@ -487,7 +688,7 @@ private fun ElementConfigSheet(
             if (element.type == ControlType.BUTTON) {
                 OutlinedTextField(
                     value = element.label,
-                    onValueChange = { onChange(element.copy(label = it)) },
+                    onValueChange = { v -> onChange { it.copy(label = v) } },
                     label = { Text("Label", fontSize = 11.sp) },
                     singleLine = true,
                     modifier = Modifier.width(150.dp),
@@ -500,15 +701,20 @@ private fun ElementConfigSheet(
                         XInput.named.forEach { (name, mask) ->
                             DropdownMenuItem(
                                 text = { Text(name) },
-                                onClick = { onChange(element.copy(button = mask)); bindMenu = false },
+                                onClick = { onChange { it.copy(button = mask) }; bindMenu = false },
                             )
                         }
                     }
                 }
                 FilterChip(
                     selected = !element.momentary,
-                    onClick = { onChange(element.copy(momentary = !element.momentary)) },
+                    onClick = { onChange { it.copy(momentary = !it.momentary) } },
                     label = { Text(if (element.momentary) "Hold" else "Toggle") },
+                )
+                FilterChip(
+                    selected = element.shift,
+                    onClick = { onChange { it.copy(shift = !it.shift) } },
+                    label = { Text("Shift") },
                 )
             }
             Spacer(Modifier.weight(1f))
@@ -531,18 +737,45 @@ private fun SettingsDialog(
         dismissButton = { TextButton(onClick = onClose) { Text("Cancel") } },
         title = { Text("Settings") },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Column(
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+            ) {
                 SliderRow("Sensitivity", c.sensitivity, 0.3f, 2.5f) { c = c.copy(sensitivity = it) }
                 SliderRow("Dead zone", c.deadZone, 0f, 0.2f) { c = c.copy(deadZone = it) }
                 SliderRow("Max steering angle°", c.maxAngleDeg, 30f, 180f) { c = c.copy(maxAngleDeg = it) }
                 SliderRow("Speedo max km/h", c.maxSpeed, 100f, 400f) { c = c.copy(maxSpeed = it) }
-                SliderRow("Tacho max rpm", c.maxRpm, 4000f, 12000f) { c = c.copy(maxRpm = it) }
-                SliderRow("Redline rpm", c.redlineRpm, 2000f, 12000f) { c = c.copy(redlineRpm = it) }
+                SwitchRow("Auto RPM (per car)", c.autoRpm) { c = c.copy(autoRpm = it) }
+                if (!c.autoRpm) {
+                    SliderRow("Tacho max rpm", c.maxRpm, 4000f, 12000f) { c = c.copy(maxRpm = it) }
+                    SliderRow("Redline rpm", c.redlineRpm, 2000f, 12000f) { c = c.copy(redlineRpm = it) }
+                }
                 ToggleRow("Speedo", c.speedoDigital) { c = c.copy(speedoDigital = it) }
                 ToggleRow("Tacho", c.tachoDigital) { c = c.copy(tachoDigital = it) }
+
+                Spacer(Modifier.height(4.dp))
+                Text("Force feedback", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = Color(0xFF4C8DFF))
+                SwitchRow("Vibration", c.haptics) { c = c.copy(haptics = it) }
+                if (c.haptics) {
+                    SliderRow("Intensity", c.hapticIntensity, 0f, 1f) { c = c.copy(hapticIntensity = it) }
+                    SwitchRow("Ignition", c.hapticIgnition) { c = c.copy(hapticIgnition = it) }
+                    SwitchRow("Gear shift", c.hapticShift) { c = c.copy(hapticShift = it) }
+                    SwitchRow("Grind (no clutch)", c.hapticGrind) { c = c.copy(hapticGrind = it) }
+                    SwitchRow("Drift / slide", c.hapticDrift) { c = c.copy(hapticDrift = it) }
+                    SwitchRow("Collision", c.hapticCollision) { c = c.copy(hapticCollision = it) }
+                }
             }
         },
     )
+}
+
+/** A labelled on/off switch row. */
+@Composable
+private fun SwitchRow(label: String, checked: Boolean, onChange: (Boolean) -> Unit) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(label, fontSize = 12.sp, color = Color(0xFFB0B0B8), modifier = Modifier.weight(1f))
+        Switch(checked = checked, onCheckedChange = onChange)
+    }
 }
 
 /** Analog vs digital chooser for a gauge. */

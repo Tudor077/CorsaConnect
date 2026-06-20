@@ -22,7 +22,7 @@ fn main() {
 
         let mut pkt = Vec::with_capacity(10);
         pkt.extend_from_slice(b"CC"); // magic
-        pkt.push(3); // version
+        pkt.push(4); // version
         pkt.extend_from_slice(&0u16.to_le_bytes()); // buttons (XInput mask)
         pkt.extend_from_slice(&steer.to_le_bytes());
         pkt.push(throttle as u8); // throttle
