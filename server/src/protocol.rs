@@ -13,12 +13,14 @@
 //!     the wheel can buzz for real slides and crashes.
 //! v5: telemetry carries learned `max_rpm` and `redline` so the tach auto-fits
 //!     each car.
+//! v6: telemetry carries the remaining OutGauge fields - `flags`, `show_lights`
+//!     and the two text displays - so the phone can show them as widgets.
 
 /// Magic prefix for phone -> server input packets.
 pub const INPUT_MAGIC: &[u8; 2] = b"CC";
 /// Magic prefix for server -> phone telemetry packets.
 pub const TELEMETRY_MAGIC: &[u8; 2] = b"CT";
-pub const PROTO_VERSION: u8 = 5;
+pub const PROTO_VERSION: u8 = 6;
 
 /// Decoded controller input coming from the phone.
 #[derive(Debug, Clone, Copy)]
@@ -70,6 +72,10 @@ pub struct TelemetryPacket {
     pub impact: f32,   // 0..1 crash strength, decaying, from MotionSim
     pub max_rpm: f32,  // learned per car (peak rpm seen); 0 until learned
     pub redline: f32,  // learned per car (shift light, or fraction of max)
+    pub flags: u16,         // OutGauge status flags bitmask
+    pub show_lights: u32,   // OutGauge dash lights currently lit (bitmask)
+    pub display1: [u8; 16], // OutGauge text display 1
+    pub display2: [u8; 16], // OutGauge text display 2
 }
 
 impl TelemetryPacket {
@@ -90,6 +96,10 @@ impl TelemetryPacket {
         b.extend_from_slice(&self.impact.to_le_bytes());
         b.extend_from_slice(&self.max_rpm.to_le_bytes());
         b.extend_from_slice(&self.redline.to_le_bytes());
+        b.extend_from_slice(&self.flags.to_le_bytes());
+        b.extend_from_slice(&self.show_lights.to_le_bytes());
+        b.extend_from_slice(&self.display1);
+        b.extend_from_slice(&self.display2);
         b
     }
 }

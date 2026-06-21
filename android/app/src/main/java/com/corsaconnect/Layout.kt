@@ -18,6 +18,20 @@ enum class ControlType {
     TACHOMETER,      // analog rpm gauge (telemetry)
     GEAR_TEXT,       // current gear
     SPEED_TEXT,      // numeric km/h
+    TURBO,           // turbo boost gauge (bar/psi)
+    FUEL,            // fuel level %
+    ENGINE_TEMP,     // engine temperature (C/F)
+    DASH_LIGHTS,     // lit dash indicators (ABS, TC, handbrake, ...)
+}
+
+/** Visual skin for the gauges/readouts. */
+enum class Design {
+    MODERN,  // the dark, colourful default
+    VAPOR;   // monochrome green-grey LCD (Trail Tech Vapor look)
+
+    companion object {
+        fun from(name: String?) = entries.firstOrNull { it.name == name } ?: MODERN
+    }
 }
 
 /**
@@ -52,25 +66,37 @@ data class Element(
     }
 
     companion object {
-        fun fromJson(o: JSONObject) = Element(
-            id = o.optString("id", UUID.randomUUID().toString()),
-            type = ControlType.valueOf(o.getString("type")),
-            x = o.getDouble("x").toFloat(),
-            y = o.getDouble("y").toFloat(),
-            w = o.getDouble("w").toFloat(),
-            h = o.getDouble("h").toFloat(),
-            label = o.optString("label", ""),
-            button = o.optInt("button", 0),
-            button2 = o.optInt("button2", 0),
-            momentary = o.optBoolean("momentary", true),
-            shift = o.optBoolean("shift", false),
-        )
+        /** Returns null for unknown/removed control types so old layouts that
+         *  reference them just drop those elements instead of failing to load. */
+        fun fromJson(o: JSONObject): Element? {
+            val type = try {
+                ControlType.valueOf(o.getString("type"))
+            } catch (e: Exception) {
+                return null
+            }
+            return Element(
+                id = o.optString("id", UUID.randomUUID().toString()),
+                type = type,
+                x = o.getDouble("x").toFloat(),
+                y = o.getDouble("y").toFloat(),
+                w = o.getDouble("w").toFloat(),
+                h = o.getDouble("h").toFloat(),
+                label = o.optString("label", ""),
+                button = o.optInt("button", 0),
+                button2 = o.optInt("button2", 0),
+                momentary = o.optBoolean("momentary", true),
+                shift = o.optBoolean("shift", false),
+            )
+        }
 
         fun newOf(type: ControlType): Element {
             val (w, h) = when (type) {
                 ControlType.SPEEDOMETER, ControlType.TACHOMETER -> 0.18f to 0.45f
                 ControlType.STEERING_BAR -> 0.5f to 0.06f
                 ControlType.GEAR_TEXT, ControlType.SPEED_TEXT -> 0.1f to 0.18f
+                ControlType.TURBO -> 0.14f to 0.34f
+                ControlType.FUEL, ControlType.ENGINE_TEMP -> 0.12f to 0.16f
+                ControlType.DASH_LIGHTS -> 0.3f to 0.1f
                 ControlType.THROTTLE_SLIDER, ControlType.BRAKE_SLIDER, ControlType.CLUTCH_SLIDER -> 0.12f to 0.6f
                 else -> 0.16f to 0.3f
             }
@@ -99,7 +125,7 @@ data class LayoutPreset(val name: String, val elements: List<Element>) {
             val arr = o.getJSONArray("elements")
             return LayoutPreset(
                 o.getString("name"),
-                (0 until arr.length()).map { Element.fromJson(arr.getJSONObject(it)) },
+                (0 until arr.length()).mapNotNull { Element.fromJson(arr.getJSONObject(it)) },
             )
         }
     }
@@ -118,8 +144,9 @@ data class Config(
     // Which preset is active: "manual", "automatic", or a saved custom name.
     val activePreset: String = "manual",
     val presets: List<LayoutPreset> = emptyList(), // user-saved custom layouts
-    val speedoDigital: Boolean = false, // false = analog gauge, true = digital number
-    val tachoDigital: Boolean = false,
+    val digitalGauges: Boolean = false, // false = analog dials, true = digital numbers (all gauges)
+    val imperial: Boolean = false,      // false = metric (km/h, C, bar), true = imperial (mph, F, psi)
+    val design: Design = Design.MODERN, // visual skin for gauges/readouts
     // Force-feedback (vibration). See [HapticSettings].
     val haptics: Boolean = true,
     val hapticIntensity: Float = 1f,     // master 0..1
@@ -152,8 +179,9 @@ data class Config(
         put("autoRpm", autoRpm)
         put("activePreset", activePreset)
         put("presets", JSONArray().apply { presets.forEach { put(it.toJson()) } })
-        put("speedoDigital", speedoDigital)
-        put("tachoDigital", tachoDigital)
+        put("digitalGauges", digitalGauges)
+        put("imperial", imperial)
+        put("design", design.name)
         put("haptics", haptics)
         put("hapticIntensity", hapticIntensity.toDouble())
         put("hapticIgnition", hapticIgnition)
@@ -167,7 +195,7 @@ data class Config(
     companion object {
         fun fromJson(o: JSONObject): Config {
             val arr = o.getJSONArray("elements")
-            val els = (0 until arr.length()).map { Element.fromJson(arr.getJSONObject(it)) }
+            val els = (0 until arr.length()).mapNotNull { Element.fromJson(arr.getJSONObject(it)) }
             return Config(
                 serverIp = o.optString("serverIp", "192.168.1.141"),
                 sensitivity = o.optDouble("sensitivity", 1.0).toFloat(),
@@ -181,8 +209,9 @@ data class Config(
                 presets = o.optJSONArray("presets")?.let { arr ->
                     (0 until arr.length()).map { LayoutPreset.fromJson(arr.getJSONObject(it)) }
                 } ?: emptyList(),
-                speedoDigital = o.optBoolean("speedoDigital", false),
-                tachoDigital = o.optBoolean("tachoDigital", false),
+                digitalGauges = o.optBoolean("digitalGauges", o.optBoolean("speedoDigital", false)),
+                imperial = o.optBoolean("imperial", false),
+                design = Design.from(o.optString("design", "MODERN")),
                 haptics = o.optBoolean("haptics", true),
                 hapticIntensity = o.optDouble("hapticIntensity", 1.0).toFloat(),
                 hapticIgnition = o.optBoolean("hapticIgnition", true),

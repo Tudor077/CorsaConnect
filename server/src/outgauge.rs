@@ -38,6 +38,11 @@ pub fn parse(buf: &[u8]) -> Option<TelemetryPacket> {
     //  60  [u8;16] Display1
     //  76  [u8;16] Display2
     let f32_at = |off: usize| f32::from_le_bytes(buf[off..off + 4].try_into().unwrap());
+    let text = |off: usize| {
+        let mut d = [0u8; 16];
+        d.copy_from_slice(&buf[off..off + 16]);
+        d
+    };
 
     let speed_ms = f32_at(12);
     Some(TelemetryPacket {
@@ -49,6 +54,10 @@ pub fn parse(buf: &[u8]) -> Option<TelemetryPacket> {
         fuel: f32_at(28),
         throttle: f32_at(48),
         brake: f32_at(52),
+        flags: u16::from_le_bytes([buf[8], buf[9]]),
+        show_lights: u32::from_le_bytes(buf[44..48].try_into().unwrap()),
+        display1: text(60),
+        display2: text(76),
         // Filled in by the relay from MotionSim / learned RPM range.
         ..Default::default()
     })

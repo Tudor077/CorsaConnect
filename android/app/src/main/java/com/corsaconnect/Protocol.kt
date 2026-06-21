@@ -13,11 +13,12 @@ import java.nio.ByteOrder
  * v3: adds `clutch` as a third analog pedal (maps to the right-stick Y axis).
  * v4: telemetry adds `slip` and `impact` (slide + crash) from BeamNG MotionSim.
  * v5: telemetry adds learned `maxRpm` and `redline` so the tach auto-fits the car.
+ * v6: telemetry adds the rest of OutGauge: `flags`, `showLights`, two text displays.
  */
 object Protocol {
     const val INPUT_PORT = 5000
     const val TELEMETRY_PORT = 5001
-    const val VERSION: Byte = 5
+    const val VERSION: Byte = 6
 
     /** Live controller state the phone streams to the server. */
     data class Input(
@@ -56,12 +57,16 @@ object Protocol {
         val impact: Float = 0f, // 0..1 crash strength, decaying
         val maxRpm: Float = 0f, // learned rev range (0 until learned)
         val redline: Float = 0f,
+        val flags: Int = 0,        // OutGauge status flags bitmask
+        val showLights: Int = 0,   // OutGauge dash lights lit (bitmask)
+        val display1: String = "", // OutGauge text display 1
+        val display2: String = "", // OutGauge text display 2
     )
 
     /** Decode a telemetry packet, or null if it isn't one. */
     fun decodeTelemetry(data: ByteArray, len: Int): Telemetry? {
-        // "CT" + version + i8 gear + 11 f32 = 48 bytes
-        if (len < 48 || data[0] != 'C'.code.toByte() || data[1] != 'T'.code.toByte()) return null
+        // "CT" + version + i8 gear + 11 f32 + u16 + u32 + 2x16 bytes = 86 bytes
+        if (len < 86 || data[0] != 'C'.code.toByte() || data[1] != 'T'.code.toByte()) return null
         if (data[2] != VERSION) return null
         val buf = ByteBuffer.wrap(data, 0, len).order(ByteOrder.LITTLE_ENDIAN)
         buf.position(3)
@@ -77,9 +82,22 @@ object Protocol {
         val impact = buf.float
         val maxRpm = buf.float
         val redline = buf.float
+        val flags = buf.short.toInt() and 0xFFFF
+        val showLights = buf.int
+        val display1 = readText(buf, 16)
+        val display2 = readText(buf, 16)
         return Telemetry(
             gear, speed, rpm, fuel, turbo, engTemp, throttle, brake, slip, impact, maxRpm, redline,
+            flags, showLights, display1, display2,
         )
+    }
+
+    /** Read [n] bytes as ASCII text, trimmed at the first null. */
+    private fun readText(buf: ByteBuffer, n: Int): String {
+        val raw = ByteArray(n)
+        buf.get(raw)
+        val end = raw.indexOf(0).let { if (it < 0) n else it }
+        return String(raw, 0, end, Charsets.US_ASCII).trim()
     }
 }
 

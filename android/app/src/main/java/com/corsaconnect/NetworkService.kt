@@ -56,7 +56,7 @@ class NetworkService(
     private fun receiverLoop() {
         try {
             val socket = DatagramSocket(Protocol.TELEMETRY_PORT).also { recvSocket = it }
-            val buf = ByteArray(64)
+            val buf = ByteArray(128)
             while (running) {
                 val packet = DatagramPacket(buf, buf.size)
                 socket.receive(packet)

@@ -23,7 +23,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -124,6 +127,7 @@ class MainActivity : ComponentActivity() {
         var selected by remember { mutableStateOf<Element?>(null) }
         var showSettings by remember { mutableStateOf(false) }
         var showPresets by remember { mutableStateOf(false) }
+        var showDesigns by remember { mutableStateOf(false) }
         var steerDisplay by remember { mutableStateOf(0f) }
 
         LaunchedEffect(config) { applyTuning(config) }
@@ -304,6 +308,7 @@ class MainActivity : ComponentActivity() {
                 } else {
                     MenuBar(
                         onPresets = { showPresets = true },
+                        onDesigns = { showDesigns = true },
                         onEdit = { editMode = true },
                         onSettings = { showSettings = true },
                         onCenter = { steering.calibrate() },
@@ -375,51 +380,73 @@ class MainActivity : ComponentActivity() {
                 onClose = { showPresets = false },
             )
         }
+
+        if (showDesigns) {
+            DesignsDialog(
+                active = config.design,
+                onPick = { config = config.copy(design = it); store.save(config) },
+                onClose = { showDesigns = false },
+            )
+        }
     }
 
     /** Renders the live content of an element (drive mode wires up interaction). */
     @Composable
     private fun ElementContent(el: Element, editMode: Boolean, steerDisplay: Float, config: Config) {
         val t = latestTelemetry
+        val lcd = config.design == Design.VAPOR
         when (el.type) {
-            ControlType.SPEEDOMETER -> Speedometer(t.speedKmh, config.maxSpeed, config.speedoDigital)
+            ControlType.SPEEDOMETER ->
+                Speedometer(t.speedKmh, config.maxSpeed, config.digitalGauges, config.imperial, lcd)
             ControlType.TACHOMETER -> {
                 val auto = config.autoRpm && t.maxRpm > 100f
                 val maxRpm = if (auto) t.maxRpm else config.maxRpm
                 val redline = if (auto && t.redline > 100f) t.redline else config.redlineRpm
-                Tachometer(t.rpm, maxRpm, redline, config.tachoDigital)
+                Tachometer(t.rpm, maxRpm, redline, config.digitalGauges, lcd)
             }
-            ControlType.GEAR_TEXT -> Readout(gearLabel(t.gear), "gear", big = true)
-            ControlType.SPEED_TEXT -> Readout(t.speedKmh.roundToInt().toString(), "km/h", big = true)
-            ControlType.STEERING_BAR -> SteeringBar(steerDisplay)
-            ControlType.GAS -> PedalButton(el.label, Color(0xFF1F7A2E), enabled = !editMode) {
+            ControlType.TURBO -> BoostGauge(t.turbo, config.digitalGauges, config.imperial, lcd)
+            ControlType.GEAR_TEXT -> ReadoutOf(lcd, gearLabel(t.gear), "gear", big = true)
+            ControlType.SPEED_TEXT ->
+                ReadoutOf(lcd, fmtSpeed(t.speedKmh, config.imperial), speedUnit(config.imperial), big = true, cells = 3)
+            ControlType.FUEL -> ReadoutOf(lcd, (t.fuel * 100f).roundToInt().toString(), "fuel %", cells = 3)
+            ControlType.ENGINE_TEMP ->
+                ReadoutOf(lcd, fmtTemp(t.engineTemp, config.imperial), tempUnit(config.imperial), cells = 3)
+            ControlType.DASH_LIGHTS -> DashLights(t.showLights, lcd)
+            ControlType.STEERING_BAR -> SteeringBar(steerDisplay, lcd)
+            ControlType.GAS -> PedalButton(el.label, if (lcd) LCD_BG else Color(0xFF1F7A2E), enabled = !editMode, lcd = lcd) {
                 throttle = if (it) 255 else 0
             }
-            ControlType.BRAKE -> PedalButton(el.label, Color(0xFF7A1F1F), enabled = !editMode) {
+            ControlType.BRAKE -> PedalButton(el.label, if (lcd) LCD_BG else Color(0xFF7A1F1F), enabled = !editMode, lcd = lcd) {
                 brake = if (it) 255 else 0
             }
-            ControlType.THROTTLE_SLIDER -> VerticalAxis(el.label, Color(0xFF1F7A2E), enabled = !editMode) {
+            ControlType.THROTTLE_SLIDER -> VerticalAxis(el.label, Color(0xFF1F7A2E), enabled = !editMode, lcd = lcd) {
                 throttle = it
             }
-            ControlType.BRAKE_SLIDER -> VerticalAxis(el.label, Color(0xFF7A1F1F), enabled = !editMode) {
+            ControlType.BRAKE_SLIDER -> VerticalAxis(el.label, Color(0xFF7A1F1F), enabled = !editMode, lcd = lcd) {
                 brake = it
             }
-            ControlType.CLUTCH_SLIDER -> VerticalAxis(el.label, Color(0xFF6A4AA8), enabled = !editMode) {
+            ControlType.CLUTCH_SLIDER -> VerticalAxis(el.label, Color(0xFF6A4AA8), enabled = !editMode, lcd = lcd) {
                 clutch = it
             }
-            ControlType.BUTTON -> XButton(el, enabled = !editMode)
+            ControlType.BUTTON -> XButton(el, enabled = !editMode, lcd = lcd)
         }
     }
 
     @Composable
-    private fun XButton(el: Element, enabled: Boolean) {
+    private fun XButton(el: Element, enabled: Boolean, lcd: Boolean = false) {
         var toggled by remember(el.id) { mutableStateOf(false) }
         val active = toggled
         val mask = el.button or el.button2 // press both at once for a combo
         PedalButton(
             label = el.label.ifBlank { XInput.comboName(el.button, el.button2) },
-            color = if (active) Color(0xFF3A5A8A) else Color(0xFF2A2A33),
+            color = when {
+                lcd && active -> LCD_FILL
+                lcd -> LCD_BG
+                active -> Color(0xFF3A5A8A)
+                else -> Color(0xFF2A2A33)
+            },
             enabled = enabled,
+            lcd = lcd,
         ) { pressed ->
             if (el.momentary) {
                 buttonsState = if (pressed) buttonsState or mask else buttonsState and mask.inv()
@@ -438,6 +465,44 @@ private fun gearLabel(gear: Int) = when {
     else -> (gear - 1).toString()
 }
 
+private fun fmtSpeed(kmh: Float, imperial: Boolean) =
+    (if (imperial) kmh * 0.621371f else kmh).roundToInt().toString()
+private fun speedUnit(imperial: Boolean) = if (imperial) "mph" else "km/h"
+private fun fmtTemp(c: Float, imperial: Boolean) =
+    (if (imperial) c * 9f / 5f + 32f else c).roundToInt().toString()
+private fun tempUnit(imperial: Boolean) = if (imperial) "°F" else "°C"
+
+/** Lit OutGauge dash indicators. Modern: amber/dim. Vapor: LCD dark/dim. */
+@Composable
+private fun DashLights(showLights: Int, lcd: Boolean = false) {
+    val items = listOf(
+        "HBRK" to 0x4, "ABS" to 0x400, "TC" to 0x10,
+        "OIL" to 0x100, "BATT" to 0x200, "BEAM" to 0x2,
+    )
+    Row(
+        Modifier
+            .then(if (lcd) Modifier.fillMaxSize().background(LCD_BG) else Modifier)
+            .padding(horizontal = 6.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        items.forEach { (name, bit) ->
+            val on = (showLights and bit) != 0
+            Text(
+                name,
+                fontSize = 11.sp,
+                fontWeight = if (lcd) FontWeight.Normal else FontWeight.Bold,
+                fontFamily = if (lcd) FontFamily.Monospace else null,
+                color = when {
+                    lcd -> if (on) LCD_DARK else LCD_DIM
+                    on -> Color(0xFFFFC400)
+                    else -> Color(0xFF44444C)
+                },
+            )
+        }
+    }
+}
+
 @Composable
 private fun Readout(value: String, label: String, big: Boolean = false) {
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -446,17 +511,33 @@ private fun Readout(value: String, label: String, big: Boolean = false) {
     }
 }
 
+/** A text readout in the active skin: LCD panel for Vapor, plain for Modern. */
 @Composable
-private fun SteeringBar(steer: Float) {
+private fun ReadoutOf(lcd: Boolean, value: String, label: String, big: Boolean = false, cells: Int = 0) {
+    if (lcd) {
+        LcdReadout(value, label, big, Modifier.fillMaxSize(), cells)
+    } else {
+        Readout(value, label, big)
+    }
+}
+
+@Composable
+private fun SteeringBar(steer: Float, lcd: Boolean = false) {
     Box(
-        Modifier.fillMaxWidth().height(18.dp).clip(RoundedCornerShape(9.dp)).background(Color(0xFF1C1C24)),
+        Modifier.fillMaxWidth().height(18.dp).clip(RoundedCornerShape(if (lcd) 0.dp else 9.dp))
+            .background(if (lcd) LCD_BG else Color(0xFF1C1C24)),
     ) {
         BoxWithConstraints(Modifier.fillMaxSize()) {
             val half = maxWidth / 2
+            // Centre marker.
+            Box(
+                Modifier.align(Alignment.Center).size(width = 2.dp, height = 18.dp)
+                    .background(if (lcd) Color(0xFF3A4A2E) else Color(0xFF44444C)),
+            )
             Box(
                 Modifier.align(Alignment.Center).offset(x = half * 0.96f * steer)
-                    .size(width = 8.dp, height = 18.dp).clip(RoundedCornerShape(4.dp))
-                    .background(Color(0xFF4C8DFF)),
+                    .size(width = 8.dp, height = 18.dp).clip(RoundedCornerShape(if (lcd) 0.dp else 4.dp))
+                    .background(if (lcd) LCD_DARK else Color(0xFF4C8DFF)),
             )
         }
     }
@@ -468,13 +549,16 @@ private fun PedalButton(
     label: String,
     color: Color,
     enabled: Boolean,
+    lcd: Boolean = false,
     onPressedChange: (Boolean) -> Unit,
 ) {
+    val haptic = LocalHapticFeedback.current
     Box(
-        Modifier.fillMaxSize().clip(RoundedCornerShape(14.dp)).background(color)
+        Modifier.fillMaxSize().clip(RoundedCornerShape(if (lcd) 0.dp else 14.dp)).background(color)
             .then(
                 if (enabled) Modifier.pointerInput(Unit) {
                     detectTapGestures(onPress = {
+                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                         onPressedChange(true)
                         try { awaitRelease() } finally { onPressedChange(false) }
                     })
@@ -482,7 +566,13 @@ private fun PedalButton(
             ),
         contentAlignment = Alignment.Center,
     ) {
-        Text(label, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+        Text(
+            label,
+            color = if (lcd) LCD_DARK else Color.White,
+            fontWeight = if (lcd) FontWeight.Normal else FontWeight.Bold,
+            fontSize = 16.sp,
+            fontFamily = if (lcd) FontFamily.Monospace else null,
+        )
     }
 }
 
@@ -495,16 +585,18 @@ private fun VerticalAxis(
     label: String,
     color: Color,
     enabled: Boolean,
+    lcd: Boolean = false,
     onValue: (Int) -> Unit,
 ) {
     var frac by remember { mutableStateOf(0f) }
     var heightPx by remember { mutableStateOf(1f) }
+    val haptic = LocalHapticFeedback.current
 
     Box(
         Modifier
             .fillMaxSize()
-            .clip(RoundedCornerShape(14.dp))
-            .background(Color(0xFF1C1C24))
+            .clip(RoundedCornerShape(if (lcd) 0.dp else 14.dp))
+            .background(if (lcd) LCD_BG else Color(0xFF1C1C24))
             .onSizeChanged { heightPx = it.height.toFloat().coerceAtLeast(1f) }
             .then(
                 if (enabled) Modifier.pointerInput(Unit) {
@@ -514,6 +606,7 @@ private fun VerticalAxis(
                             onValue((frac * 255).roundToInt())
                         }
                         val down = awaitFirstDown()
+                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                         apply(down.position.y)
                         while (true) {
                             val event = awaitPointerEvent()
@@ -533,20 +626,22 @@ private fun VerticalAxis(
             Modifier
                 .fillMaxWidth()
                 .fillMaxHeight(frac)
-                .clip(RoundedCornerShape(14.dp))
-                .background(color),
+                .clip(RoundedCornerShape(if (lcd) 0.dp else 14.dp))
+                .background(if (lcd) LCD_FILL else color),
         )
         Text(
             label,
-            color = Color.White,
-            fontWeight = FontWeight.Bold,
+            color = if (lcd) LCD_DARK else Color.White,
+            fontWeight = if (lcd) FontWeight.Normal else FontWeight.Bold,
             fontSize = 14.sp,
+            fontFamily = if (lcd) FontFamily.Monospace else null,
             modifier = Modifier.align(Alignment.TopCenter).padding(top = 8.dp),
         )
         Text(
             "${(frac * 100).roundToInt()}%",
-            color = Color(0xFFB0B0B8),
+            color = if (lcd) LCD_DARK else Color(0xFFB0B0B8),
             fontSize = 13.sp,
+            fontFamily = if (lcd) FontFamily.Monospace else null,
             modifier = Modifier.align(Alignment.Center),
         )
     }
@@ -596,6 +691,7 @@ private fun StartScreen(ip: String, onIpChange: (String) -> Unit, onConnect: () 
 @Composable
 private fun MenuBar(
     onPresets: () -> Unit,
+    onDesigns: () -> Unit,
     onEdit: () -> Unit,
     onSettings: () -> Unit,
     onCenter: () -> Unit,
@@ -617,6 +713,7 @@ private fun MenuBar(
         }
         DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
             DropdownMenuItem(text = { Text("Presets") }, onClick = { open = false; onPresets() })
+            DropdownMenuItem(text = { Text("Designs") }, onClick = { open = false; onDesigns() })
             DropdownMenuItem(text = { Text("Edit layout") }, onClick = { open = false; onEdit() })
             DropdownMenuItem(text = { Text("Settings") }, onClick = { open = false; onSettings() })
             DropdownMenuItem(text = { Text("Re-center wheel") }, onClick = { open = false; onCenter() })
@@ -678,6 +775,22 @@ private fun PresetsDialog(
     )
 }
 
+/** Pick a visual skin for the gauges. */
+@Composable
+private fun DesignsDialog(active: Design, onPick: (Design) -> Unit, onClose: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onClose,
+        confirmButton = { Button(onClick = onClose) { Text("Done") } },
+        title = { Text("Designs") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                PresetRow("Modern", active == Design.MODERN, onApply = { onPick(Design.MODERN) })
+                PresetRow("Vapor (LCD)", active == Design.VAPOR, onApply = { onPick(Design.VAPOR) })
+            }
+        },
+    )
+}
+
 @Composable
 private fun PresetRow(
     name: String,
@@ -727,6 +840,10 @@ private fun EditBar(
                     "Gear" to ControlType.GEAR_TEXT,
                     "Speed text" to ControlType.SPEED_TEXT,
                     "Steering bar" to ControlType.STEERING_BAR,
+                    "Turbo" to ControlType.TURBO,
+                    "Fuel" to ControlType.FUEL,
+                    "Engine temp" to ControlType.ENGINE_TEMP,
+                    "Dash lights" to ControlType.DASH_LIGHTS,
                 )
                 items.forEach { (name, type) ->
                     DropdownMenuItem(text = { Text(name) }, onClick = { onAdd(type); addMenu = false })
@@ -870,23 +987,27 @@ private fun SettingsDialog(
         title = { Text("Settings") },
         text = {
             Column(
-                verticalArrangement = Arrangement.spacedBy(4.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
                 modifier = Modifier.verticalScroll(rememberScrollState()),
             ) {
+                SettingsHeader("Units", first = true)
+                UnitsRow(c.imperial) { c = c.copy(imperial = it) }
+
+                SettingsHeader("Steering")
                 SliderRow("Sensitivity", c.sensitivity, 0.3f, 2.5f) { c = c.copy(sensitivity = it) }
                 SliderRow("Dead zone", c.deadZone, 0f, 0.2f) { c = c.copy(deadZone = it) }
                 SliderRow("Max steering angle°", c.maxAngleDeg, 30f, 180f) { c = c.copy(maxAngleDeg = it) }
-                SliderRow("Speedo max km/h", c.maxSpeed, 100f, 400f) { c = c.copy(maxSpeed = it) }
+
+                SettingsHeader("Gauges")
+                SliderRow("Speedo max (km/h)", c.maxSpeed, 100f, 400f) { c = c.copy(maxSpeed = it) }
                 SwitchRow("Auto RPM (per car)", c.autoRpm) { c = c.copy(autoRpm = it) }
                 if (!c.autoRpm) {
                     SliderRow("Tacho max rpm", c.maxRpm, 4000f, 12000f) { c = c.copy(maxRpm = it) }
                     SliderRow("Redline rpm", c.redlineRpm, 2000f, 12000f) { c = c.copy(redlineRpm = it) }
                 }
-                ToggleRow("Speedo", c.speedoDigital) { c = c.copy(speedoDigital = it) }
-                ToggleRow("Tacho", c.tachoDigital) { c = c.copy(tachoDigital = it) }
+                ToggleRow("Gauges", c.digitalGauges) { c = c.copy(digitalGauges = it) }
 
-                Spacer(Modifier.height(4.dp))
-                Text("Force feedback", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = Color(0xFF4C8DFF))
+                SettingsHeader("Force feedback")
                 SwitchRow("Vibration", c.haptics) { c = c.copy(haptics = it) }
                 if (c.haptics) {
                     SliderRow("Intensity", c.hapticIntensity, 0f, 1f) { c = c.copy(hapticIntensity = it) }
@@ -907,6 +1028,24 @@ private fun SwitchRow(label: String, checked: Boolean, onChange: (Boolean) -> Un
     Row(verticalAlignment = Alignment.CenterVertically) {
         Text(label, fontSize = 12.sp, color = Color(0xFFB0B0B8), modifier = Modifier.weight(1f))
         Switch(checked = checked, onCheckedChange = onChange)
+    }
+}
+
+/** A bold section header that turns the settings into a clear scrollable list. */
+@Composable
+private fun SettingsHeader(title: String, first: Boolean = false) {
+    if (!first) HorizontalDivider(Modifier.padding(top = 8.dp, bottom = 2.dp), color = Color(0xFF2A2A33))
+    Text(title, fontSize = 13.sp, fontWeight = FontWeight.Bold, color = Color(0xFF4C8DFF))
+}
+
+/** Metric vs imperial unit system. */
+@Composable
+private fun UnitsRow(imperial: Boolean, onChange: (Boolean) -> Unit) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text("System", fontSize = 12.sp, color = Color(0xFFB0B0B8), modifier = Modifier.width(70.dp))
+        FilterChip(selected = !imperial, onClick = { onChange(false) }, label = { Text("Metric") })
+        Spacer(Modifier.width(8.dp))
+        FilterChip(selected = imperial, onClick = { onChange(true) }, label = { Text("Imperial") })
     }
 }
 
