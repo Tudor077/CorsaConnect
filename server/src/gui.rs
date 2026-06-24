@@ -109,7 +109,7 @@ impl eframe::App for App {
             ui.vertical_centered(|ui| {
                 ui.label(RichText::new("CorsaConnect").size(26.0).strong());
                 ui.label(
-                    RichText::new("BeamNG steering wheel server")
+                    RichText::new("Phone steering wheel + telemetry server")
                         .size(13.0)
                         .color(MUTED),
                 );

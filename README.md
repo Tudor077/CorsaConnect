@@ -1,8 +1,10 @@
 # CorsaConnect
 
 Turn an Android phone into a gyroscopic steering wheel **and** a live dashboard
-for [BeamNG.drive](https://www.beamng.com/). The phone tilts to steer and shows
-speed / RPM / gear streamed from the game.
+for your racing games. The phone tilts to steer and works as a controller in any
+game; for games that support telemetry it also shows live speed / RPM / gear and
+gives the wheel force feedback. Telemetry is wired for
+[BeamNG.drive](https://www.beamng.com/) today, with more games on the way.
 
 ```
 ┌─────────────── ANDROID (Kotlin) ───────────────┐
@@ -12,7 +14,7 @@ speed / RPM / gear streamed from the game.
        │ input UDP :5000                │ telemetry UDP :5001
        ▼                                │
 ┌──────────────── PC SERVER (Rust) ─────┴──────────┐
-│  • ViGEmBus: virtual Xbox 360 pad  -> BeamNG     │
+│  • ViGEmBus: virtual Xbox 360 pad  -> any game   │
 │  • OutGauge  UDP :4444 -> parsed -> phone dash    │
 │  • MotionSim UDP :4445 -> slide + crash -> wheel  │
 └──────────────────────────────────────────────────┘

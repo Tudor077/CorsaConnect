@@ -658,7 +658,7 @@ private fun StartScreen(ip: String, onIpChange: (String) -> Unit, onConnect: () 
         ) {
             Text("CorsaConnect", color = Color.White, fontSize = 34.sp, fontWeight = FontWeight.Bold)
             Text(
-                "BeamNG steering wheel",
+                "Phone steering wheel + dashboard",
                 color = Color(0xFF8A8A95),
                 fontSize = 14.sp,
                 modifier = Modifier.padding(bottom = 28.dp),
