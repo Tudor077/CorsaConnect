@@ -12,6 +12,7 @@ mod gui;
 mod motionsim;
 mod outgauge;
 mod protocol;
+mod scstelemetry;
 mod server;
 
 fn main() -> eframe::Result<()> {

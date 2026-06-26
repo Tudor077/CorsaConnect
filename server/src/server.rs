@@ -11,7 +11,8 @@ use std::time::{Duration, Instant};
 
 use crate::motionsim;
 use crate::outgauge;
-use crate::protocol::InputPacket;
+use crate::protocol::{InputPacket, TelemetryPacket};
+use crate::scstelemetry;
 use vigem_client::{Client, TargetId, XButtons, XGamepad, Xbox360Wired};
 
 /// Port the phone sends controller input to.
@@ -201,29 +202,38 @@ pub fn run(shared: Arc<Shared>, stop: Arc<AtomicBool>, game: Game) {
     // Where to send telemetry, learned from the phone's first input packet.
     let phone_addr: Arc<Mutex<Option<SocketAddr>>> = Arc::new(Mutex::new(None));
 
-    // Telemetry (dashboard + force feedback) is currently wired for BeamNG only.
-    // Other games still get the full virtual controller; their telemetry parsers
-    // are added one at a time.
-    let (relay, motion) = if game == Game::BeamNg {
-        let relay = {
-            let shared = Arc::clone(&shared);
-            let stop = Arc::clone(&stop);
-            let phone_addr = Arc::clone(&phone_addr);
-            std::thread::spawn(move || telemetry_relay(shared, stop, phone_addr))
-        };
-        let motion = {
-            let shared = Arc::clone(&shared);
-            let stop = Arc::clone(&stop);
-            std::thread::spawn(move || motion_listener(shared, stop))
-        };
-        (Some(relay), Some(motion))
-    } else {
-        shared.log(format!(
-            "{}: wheel, pedals and buttons are live. Dashboard/feedback telemetry isn't wired for this game yet.",
-            game.name()
-        ));
-        (None, None)
-    };
+    // Telemetry (dashboard + force feedback) per game. The virtual controller
+    // works everywhere; only the telemetry source differs.
+    let mut telem: Vec<std::thread::JoinHandle<()>> = Vec::new();
+    match game {
+        Game::BeamNg => {
+            telem.push({
+                let shared = Arc::clone(&shared);
+                let stop = Arc::clone(&stop);
+                let phone_addr = Arc::clone(&phone_addr);
+                std::thread::spawn(move || telemetry_relay(shared, stop, phone_addr))
+            });
+            telem.push({
+                let shared = Arc::clone(&shared);
+                let stop = Arc::clone(&stop);
+                std::thread::spawn(move || motion_listener(shared, stop))
+            });
+        }
+        Game::TruckSim => {
+            telem.push({
+                let shared = Arc::clone(&shared);
+                let stop = Arc::clone(&stop);
+                let phone_addr = Arc::clone(&phone_addr);
+                std::thread::spawn(move || truck_telemetry(shared, stop, phone_addr))
+            });
+        }
+        Game::Wrc10 => {
+            shared.log(format!(
+                "{}: wheel, pedals and buttons are live. Dashboard telemetry isn't wired for this game yet.",
+                game.name()
+            ));
+        }
+    }
 
     if let Err(e) = input_loop(&shared, &stop, &mut pad, &phone_addr) {
         let msg = format!("Input listener stopped: {e}");
@@ -231,11 +241,8 @@ pub fn run(shared: Arc<Shared>, stop: Arc<AtomicBool>, game: Game) {
         shared.set_status(|s| s.error = Some(msg));
     }
 
-    if let Some(relay) = relay {
-        let _ = relay.join();
-    }
-    if let Some(motion) = motion {
-        let _ = motion.join();
+    for h in telem {
+        let _ = h.join();
     }
     // Dropping `pad` here unplugs the virtual controller.
     shared.set_status(|s| {
@@ -407,6 +414,58 @@ fn telemetry_relay(
         if let Some(addr) = *phone_addr.lock().unwrap() {
             let _ = tx.send_to(&tel.encode(), addr);
         }
+    }
+}
+
+/// Reads ETS2 / ATS telemetry from the scs-sdk-plugin shared memory and relays
+/// speed / rpm / gear to the phone.
+fn truck_telemetry(
+    shared: Arc<Shared>,
+    stop: Arc<AtomicBool>,
+    phone_addr: Arc<Mutex<Option<SocketAddr>>>,
+) {
+    let tx = match UdpSocket::bind(("0.0.0.0", 0)) {
+        Ok(s) => s,
+        Err(e) => {
+            shared.log(format!("Could not open telemetry sender socket: {e}"));
+            return;
+        }
+    };
+    shared.log("Looking for ETS2/ATS telemetry (install the scs-sdk-plugin DLL)...");
+
+    // Wait for the shared memory to appear (game + plugin running).
+    let scs = loop {
+        if stop.load(Ordering::Relaxed) {
+            return;
+        }
+        if let Some(s) = scstelemetry::ScsShared::open() {
+            break s;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    };
+    shared.log("Truck telemetry connected.");
+    shared.set_status(|s| s.beamng = true);
+
+    while !stop.load(Ordering::Relaxed) {
+        let mut tel = TelemetryPacket {
+            speed_kmh: scs.speed_ms() * 3.6,
+            rpm: scs.rpm(),
+            // SCS gear: 1 = 1st, 0 = neutral, -1 = reverse. Ours: 0 = R, 1 = N, 2 = 1st.
+            gear: (scs.gear() + 1) as i8,
+            fuel: scs.fuel_frac(),
+            engine_temp: scs.water_temp(),
+            show_lights: scs.show_lights(),
+            ..Default::default()
+        };
+        // Sensible truck rev range until we read the real one from the plugin.
+        tel.max_rpm = 3000.0;
+        tel.redline = 2600.0;
+
+        shared.set_status(|s| s.last = Some((tel.speed_kmh, tel.rpm, tel.gear)));
+        if let Some(addr) = *phone_addr.lock().unwrap() {
+            let _ = tx.send_to(&tel.encode(), addr);
+        }
+        std::thread::sleep(Duration::from_millis(16));
     }
 }
 
