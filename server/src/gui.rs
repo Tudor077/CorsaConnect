@@ -135,8 +135,14 @@ impl App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Keep status/log fresh while running.
-        ctx.request_repaint_after(Duration::from_millis(200));
+        // Keep status/log fresh while running; repaint fast while the head
+        // tracking preview is live so it doesn't look like a slideshow.
+        let repaint = if self.head.running && self.head.show_preview {
+            Duration::from_millis(33)
+        } else {
+            Duration::from_millis(200)
+        };
+        ctx.request_repaint_after(repaint);
 
         let status = self.shared.status();
         // A fatal error in the server thread flips us back to stopped.
@@ -405,6 +411,7 @@ impl App {
                 ui.add_enabled_ui(!self.head.running, |ui| {
                     slider_row(ui, "Camera FOV", &mut settings.fov, 40.0..=110.0, "\u{00B0}");
                 });
+                ui.checkbox(&mut settings.low_light, "Low light boost (full fps in a dark room)");
 
                 ui.collapsing("Axes", |ui| {
                     egui::Grid::new("head_axes").spacing([16.0, 4.0]).show(ui, |ui| {

@@ -5,10 +5,11 @@
 //! can use head tracking with or without the phone connected.
 
 mod filter;
+mod lowlight;
 mod nn;
 mod pnp;
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -38,6 +39,9 @@ pub struct Settings {
     pub axis_on: [bool; 6],
     /// Per-axis mirror (flips the direction).
     pub axis_mirror: [bool; 6],
+    /// Force short manual exposure + hardware gain so the camera keeps full
+    /// frame rate in a dark room (the usual cause of tracking lag).
+    pub low_light: bool,
 }
 
 pub const AXIS_NAMES: [&str; 6] = ["Yaw", "Pitch", "Roll", "Move X", "Move Y", "Move Z"];
@@ -52,6 +56,7 @@ impl Default for Settings {
             pos_gain: 1.0,
             axis_on: [true; 6],
             axis_mirror: [false; 6],
+            low_light: true,
         }
     }
 }
@@ -142,13 +147,44 @@ struct FrameSlot {
     ready: Condvar,
 }
 
+/// Latest pose sample + velocity, feeding the 100 Hz output thread.
+struct OutState {
+    pose: HeadPose,
+    vel: [f32; 6],
+    at: Instant,
+}
+
+/// The shortest shutter we try first (1/32 s ~ 30 fps) and the longest we
+/// fall back to when the room is too dark to see a face (1/8 s ~ 8 fps,
+/// which is no worse than what auto exposure would do).
+const EXPOSURE_FAST: i32 = -5;
+const EXPOSURE_SLOW: i32 = -3;
+
+fn apply_low_light(shared: &Arc<Shared>, camera_name: &str, on: bool, ev: i32) {
+    if on {
+        match lowlight::force_low_light(camera_name, ev) {
+            Ok(a) if a.exposure => shared.log(format!(
+                "Low light boost: manual exposure 1/{} s (keeps the fps up in the dark).",
+                1u32 << (-ev).max(0)
+            )),
+            Ok(_) => shared.log("Low light boost: this camera exposes no exposure control."),
+            Err(e) => shared.log(format!("Low light boost failed: {e}")),
+        }
+    } else {
+        match lowlight::restore_auto(camera_name) {
+            Ok(()) => shared.log("Camera exposure back on automatic."),
+            Err(e) => shared.log(format!("Could not restore auto exposure: {e}")),
+        }
+    }
+}
+
 /// Capture thread: owns the camera, decodes frames, publishes the latest one.
 fn capture_loop(
     camera_index: u32,
     slot: Arc<FrameSlot>,
     stop: Arc<AtomicBool>,
-    // Reports (width, height, fps) once on success, or the open error.
-    started: mpsc::Sender<Result<(usize, usize, u32), String>>,
+    // Reports (width, height, fps, device name) once on success, or the error.
+    started: mpsc::Sender<Result<(usize, usize, u32, String), String>>,
     fail: Arc<Mutex<Option<String>>>,
 ) {
     let mut camera = match open_camera(camera_index) {
@@ -163,6 +199,7 @@ fn capture_loop(
         res.width() as usize,
         res.height() as usize,
         camera.frame_rate(),
+        camera.info().human_name(),
     )));
 
     let mut seq = 0u64;
@@ -191,7 +228,7 @@ fn track(
 ) -> Result<(), String> {
     let cfg = *settings.lock().unwrap();
 
-    let mut writer = FreetrackWriter::new(|m| shared.log(m))?;
+    let writer = FreetrackWriter::new(|m| shared.log(m))?;
 
     shared.log("Loading face tracking models...");
     let t0 = Instant::now();
@@ -219,7 +256,7 @@ fn track(
     let cam_result = started_rx
         .recv()
         .map_err(|_| "Camera thread died while starting".to_string())?;
-    let (fw, fh, cam_fps) = match cam_result {
+    let (fw, fh, cam_fps, cam_name) = match cam_result {
         Ok(v) => v,
         Err(e) => {
             let _ = capture.join();
@@ -228,6 +265,53 @@ fn track(
     };
     shared.log(format!("Camera open: {fw}x{fh} @ {cam_fps} fps."));
     set_status(shared, |s| s.camera_ok = true);
+
+    // Keep the sensor at a high frame rate in dark rooms (auto exposure would
+    // stretch the shutter and collapse the fps, which feels like lag). If the
+    // room turns out too dark to track at the fast shutter, the loop below
+    // relaxes the exposure one stop at a time until the face comes back.
+    let mut low_light_on = cfg.low_light;
+    let mut exposure_ev = EXPOSURE_FAST;
+    let mut no_face_frames = 0u32;
+    if low_light_on {
+        apply_low_light(shared, &cam_name, true, exposure_ev);
+    }
+
+    // The game-facing pose is published at 100 Hz on its own thread, linearly
+    // extrapolated from the last two camera samples, so the in-game view
+    // moves smoothly even when the camera delivers far fewer frames.
+    let out_state = Arc::new(Mutex::new(OutState {
+        pose: HeadPose::default(),
+        vel: [0.0; 6],
+        at: Instant::now(),
+    }));
+    let game_id = Arc::new(AtomicI32::new(0));
+    let output = {
+        let out_state = Arc::clone(&out_state);
+        let game_id = Arc::clone(&game_id);
+        let stop = Arc::clone(stop);
+        std::thread::spawn(move || {
+            let mut writer = writer;
+            while !stop.load(Ordering::Relaxed) {
+                let (pose, vel, at) = {
+                    let s = out_state.lock().unwrap();
+                    (s.pose, s.vel, s.at)
+                };
+                let dt = at.elapsed().as_secs_f32().min(0.15);
+                let p = HeadPose {
+                    yaw: pose.yaw + vel[0] * dt,
+                    pitch: pose.pitch + vel[1] * dt,
+                    roll: pose.roll + vel[2] * dt,
+                    x: pose.x + vel[3] * dt,
+                    y: pose.y + vel[4] * dt,
+                    z: pose.z + vel[5] * dt,
+                };
+                game_id.store(writer.write(p), Ordering::Relaxed);
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            // Dropping the writer zeroes the pose for the game.
+        })
+    };
 
     let mut solver = pnp::Solver::new(fw as f64, fh as f64, cfg.fov as f64);
     let mut filters: Vec<OneEuro> = (0..6).map(|_| OneEuro::new(1.0, 0.1)).collect();
@@ -239,6 +323,8 @@ fn track(
     let mut last_frame = Instant::now();
     let mut fps = 0.0f32;
     let mut last_pose = HeadPose::default();
+    let mut vel = [0.0f32; 6];
+    let mut prev_out: Option<(HeadPose, Instant)> = None;
 
     let mut last_seq = 0u64;
     while !stop.load(Ordering::Relaxed) {
@@ -275,6 +361,12 @@ fn track(
         fps = fps * 0.9 + (1.0 / dt) * 0.1;
 
         let cfg = *settings.lock().unwrap();
+        if cfg.low_light != low_light_on {
+            low_light_on = cfg.low_light;
+            exposure_ev = EXPOSURE_FAST;
+            no_face_frames = 0;
+            apply_low_light(shared, &cam_name, low_light_on, exposure_ev);
+        }
 
         // Brightness compensation so tracking still works in a dim room.
         let gain = nn::auto_gain(rgb);
@@ -361,15 +453,53 @@ fn track(
             }
         }
 
-        // Keep publishing the last pose while the face is briefly lost, so the
-        // view holds instead of snapping to center.
-        let game_id = writer.write(last_pose);
+        // Too dark to see anyone at this shutter speed? Trade fps for light,
+        // one stop at a time (~1.5 s per step).
+        if low_light_on && !have_pose {
+            no_face_frames += 1;
+            if no_face_frames > 45 && exposure_ev < EXPOSURE_SLOW {
+                exposure_ev += 1;
+                no_face_frames = 0;
+                shared.log("No face at this shutter speed - letting more light in.".to_string());
+                apply_low_light(shared, &cam_name, true, exposure_ev);
+            }
+        } else {
+            no_face_frames = 0;
+        }
+
+        // Feed the output thread: fresh velocity while tracking, zero (hold
+        // the last pose) while the face is briefly lost.
+        if have_pose {
+            if let Some((pp, pt)) = prev_out {
+                let dt = now.duration_since(pt).as_secs_f32().clamp(1e-3, 0.5);
+                let nv = [
+                    (last_pose.yaw - pp.yaw) / dt,
+                    (last_pose.pitch - pp.pitch) / dt,
+                    (last_pose.roll - pp.roll) / dt,
+                    (last_pose.x - pp.x) / dt,
+                    (last_pose.y - pp.y) / dt,
+                    (last_pose.z - pp.z) / dt,
+                ];
+                for (v, n) in vel.iter_mut().zip(nv) {
+                    *v = *v * 0.5 + n * 0.5;
+                }
+            }
+            prev_out = Some((last_pose, now));
+        } else {
+            vel = [0.0; 6];
+            prev_out = None;
+        }
+        *out_state.lock().unwrap() = OutState {
+            pose: last_pose,
+            vel,
+            at: now,
+        };
 
         set_status(shared, |s| {
             s.camera_ok = true;
             s.face = have_pose;
             s.fps = fps;
-            s.game_id = game_id;
+            s.game_id = game_id.load(Ordering::Relaxed);
             s.yaw = last_pose.yaw;
             s.pitch = last_pose.pitch;
         });
@@ -378,7 +508,11 @@ fn track(
             publish_preview(shared, rgb, fw, fh, have_pose.then_some(&points), &face);
         }
     }
+    if low_light_on {
+        apply_low_light(shared, &cam_name, false, EXPOSURE_FAST);
+    }
     let _ = capture.join();
+    let _ = output.join();
     Ok(())
 }
 
@@ -516,6 +650,12 @@ mod tests {
         let (fw, fh) = (res.width() as usize, res.height() as usize);
         println!("camera: {}x{} @ {} fps", res.width(), res.height(), camera.frame_rate());
 
+        let name = camera.info().human_name();
+        match lowlight::force_low_light(&name, EXPOSURE_FAST) {
+            Ok(a) => println!("low light boost: exposure {} gain {}", a.exposure, a.gain),
+            Err(e) => println!("low light boost failed: {e}"),
+        }
+
         let mut nets = Nets::load().unwrap();
         let mut solver = pnp::Solver::new(fw as f64, fh as f64, 70.0);
         let mut points = [[0.0f32; 2]; LM_COUNT];
@@ -554,6 +694,7 @@ mod tests {
                 println!("frame {i}: no face (cap {t_cap:.0} dec {t_dec:.0} det {t_det:.0} ms, gain {gain:.1})");
             }
         }
+        let _ = lowlight::restore_auto(&name);
     }
 }
 

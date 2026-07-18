@@ -250,7 +250,7 @@ pub fn auto_gain(rgb: &[u8]) -> f32 {
         return 1.0;
     }
     let mean = sum as f32 / n as f32;
-    (110.0 / mean.max(1.0)).clamp(1.0, 4.0)
+    (110.0 / mean.max(1.0)).clamp(1.0, 6.0)
 }
 
 /// Inverse sigmoid scaled the way OpenSeeFace trains its offset maps.
