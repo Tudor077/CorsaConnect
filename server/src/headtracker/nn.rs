@@ -77,8 +77,15 @@ impl Nets {
         })
     }
 
-    /// Find the most confident face in the frame. `rgb` is packed RGB8.
-    pub fn detect_face(&mut self, rgb: &[u8], fw: usize, fh: usize) -> TractResult<Option<FaceBox>> {
+    /// Find the most confident face in the frame. `rgb` is packed RGB8;
+    /// `gain` is a brightness multiplier (see [auto_gain]) for dim rooms.
+    pub fn detect_face(
+        &mut self,
+        rgb: &[u8],
+        fw: usize,
+        fh: usize,
+        gain: f32,
+    ) -> TractResult<Option<FaceBox>> {
         // UltraFace normalization: (px - 127) / 128.
         sample_region_nchw(
             rgb,
@@ -88,7 +95,7 @@ impl Nets {
             DET_W,
             DET_H,
             &mut self.det_input,
-            |c| (c - 127.0) / 128.0,
+            |c| ((c * gain).min(255.0) - 127.0) / 128.0,
         );
         let input = Tensor::from_shape(&[1, 3, DET_H, DET_W], &self.det_input)?;
         let out = self.detector.run(tvec!(input.into_tvalue()))?;
@@ -106,7 +113,7 @@ impl Nets {
         let mut best: Option<(f32, FaceBox)> = None;
         for i in 0..n {
             let score = scores[[0, i, 1]];
-            if score < 0.7 {
+            if score < 0.5 {
                 continue;
             }
             if best.map(|(s, _)| score > s).unwrap_or(true) {
@@ -132,6 +139,7 @@ impl Nets {
         fw: usize,
         fh: usize,
         face: &FaceBox,
+        gain: f32,
         out_points: &mut [[f32; 2]; LM_COUNT],
     ) -> TractResult<f32> {
         // ImageNet normalization, RGB.
@@ -145,7 +153,7 @@ impl Nets {
             LM_SIZE,
             LM_SIZE,
             &mut self.lm_input,
-            |c, ch| (c / 255.0 - MEAN[ch]) / STD[ch],
+            |c, ch| ((c * gain).min(255.0) / 255.0 - MEAN[ch]) / STD[ch],
         );
         let input = Tensor::from_shape(&[1, 3, LM_SIZE, LM_SIZE], &self.lm_input)?;
         let out = self.landmarks.run(tvec!(input.into_tvalue()))?;
@@ -191,7 +199,9 @@ mod tests {
     fn models_load_and_run() {
         let mut nets = Nets::load().expect("models should load under tract");
         let rgb = vec![128u8; 640 * 480 * 3];
-        let found = nets.detect_face(&rgb, 640, 480).expect("detector should run");
+        let found = nets
+            .detect_face(&rgb, 640, 480, 1.0)
+            .expect("detector should run");
         assert!(found.is_none(), "uniform gray frame should contain no face");
 
         let face = FaceBox {
@@ -202,7 +212,7 @@ mod tests {
         };
         let mut points = [[0.0f32; 2]; LM_COUNT];
         let conf = nets
-            .landmarks(&rgb, 640, 480, &face, &mut points)
+            .landmarks(&rgb, 640, 480, &face, 1.0, &mut points)
             .expect("landmark model should run");
         assert!(conf.is_finite());
         for p in &points {
@@ -227,13 +237,15 @@ mod tests {
 
         let mut nets = Nets::load().unwrap();
         let face = nets
-            .detect_face(&rgb, fw, fh)
+            .detect_face(&rgb, fw, fh, 1.0)
             .unwrap()
             .expect("the astronaut's face should be detected")
             .expanded(0.1, fw, fh);
 
         let mut points = [[0.0f32; 2]; LM_COUNT];
-        let conf = nets.landmarks(&rgb, fw, fh, &face, &mut points).unwrap();
+        let conf = nets
+            .landmarks(&rgb, fw, fh, &face, 1.0, &mut points)
+            .unwrap();
         assert!(conf > 0.4, "confidence {conf} too low");
         for p in &points {
             assert!(
@@ -282,6 +294,25 @@ mod tests {
     }
 
     const CONTOUR_IDX_SET: [usize; 18] = crate::headtracker::pnp::CONTOUR_IDX;
+}
+
+/// Brightness gain for dim rooms: how much to multiply the frame so its mean
+/// luma reaches a comfortable level, capped so noise isn't over-amplified.
+pub fn auto_gain(rgb: &[u8]) -> f32 {
+    // Green channel, sparse sampling: plenty for a mean.
+    let mut sum = 0u64;
+    let mut n = 0u64;
+    let mut i = 1;
+    while i < rgb.len() {
+        sum += rgb[i] as u64;
+        n += 1;
+        i += 48; // every 16th pixel
+    }
+    if n == 0 {
+        return 1.0;
+    }
+    let mean = sum as f32 / n as f32;
+    (110.0 / mean.max(1.0)).clamp(1.0, 4.0)
 }
 
 /// Inverse sigmoid scaled the way OpenSeeFace trains its offset maps.

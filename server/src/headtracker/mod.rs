@@ -9,8 +9,9 @@ mod nn;
 mod pnp;
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::sync::mpsc;
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 use crate::freetrack::{FreetrackWriter, HeadPose};
 use crate::server::Shared;
@@ -40,7 +41,7 @@ impl Default for Settings {
         Settings {
             camera: 0,
             fov: 70.0,
-            smoothing: 0.5,
+            smoothing: 0.4,
             rot_gain: 2.5,
             pos_gain: 1.0,
         }
@@ -126,6 +127,55 @@ pub fn run(shared: Arc<Shared>, stop: Arc<AtomicBool>, settings: Arc<Mutex<Setti
     shared.log("Head tracking stopped.");
 }
 
+/// Newest decoded camera frame; older ones are dropped so a slow processing
+/// step never builds up queue latency.
+struct FrameSlot {
+    frame: Mutex<Option<(u64, Vec<u8>)>>,
+    ready: Condvar,
+}
+
+/// Capture thread: owns the camera, decodes frames, publishes the latest one.
+fn capture_loop(
+    camera_index: u32,
+    slot: Arc<FrameSlot>,
+    stop: Arc<AtomicBool>,
+    // Reports (width, height, fps) once on success, or the open error.
+    started: mpsc::Sender<Result<(usize, usize, u32), String>>,
+    fail: Arc<Mutex<Option<String>>>,
+) {
+    let mut camera = match open_camera(camera_index) {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = started.send(Err(e));
+            return;
+        }
+    };
+    let res = camera.resolution();
+    let _ = started.send(Ok((
+        res.width() as usize,
+        res.height() as usize,
+        camera.frame_rate(),
+    )));
+
+    let mut seq = 0u64;
+    while !stop.load(Ordering::Relaxed) {
+        let frame = match camera.frame() {
+            Ok(f) => f,
+            Err(e) => {
+                *fail.lock().unwrap() = Some(format!("Camera stopped: {e}"));
+                break;
+            }
+        };
+        let Ok(img) = frame.decode_image::<RgbFormat>() else {
+            continue;
+        };
+        seq += 1;
+        *slot.frame.lock().unwrap() = Some((seq, img.into_raw()));
+        slot.ready.notify_one();
+    }
+    slot.ready.notify_all();
+}
+
 fn track(
     shared: &Arc<Shared>,
     stop: &Arc<AtomicBool>,
@@ -144,15 +194,31 @@ fn track(
         cfg.camera
     ));
 
-    let mut camera = open_camera(cfg.camera)?;
-    let res = camera.resolution();
-    let (fw, fh) = (res.width() as usize, res.height() as usize);
-    shared.log(format!(
-        "Camera open: {}x{} @ {} fps.",
-        res.width(),
-        res.height(),
-        camera.frame_rate()
-    ));
+    // Camera runs on its own thread; we always process the newest frame and
+    // silently drop any we're too slow for, so latency can't accumulate.
+    let slot = Arc::new(FrameSlot {
+        frame: Mutex::new(None),
+        ready: Condvar::new(),
+    });
+    let cam_fail: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let (started_tx, started_rx) = mpsc::channel();
+    let capture = {
+        let slot = Arc::clone(&slot);
+        let stop = Arc::clone(stop);
+        let fail = Arc::clone(&cam_fail);
+        std::thread::spawn(move || capture_loop(cfg.camera, slot, stop, started_tx, fail))
+    };
+    let cam_result = started_rx
+        .recv()
+        .map_err(|_| "Camera thread died while starting".to_string())?;
+    let (fw, fh, cam_fps) = match cam_result {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = capture.join();
+            return Err(e);
+        }
+    };
+    shared.log(format!("Camera open: {fw}x{fh} @ {cam_fps} fps."));
     set_status(shared, |s| s.camera_ok = true);
 
     let mut solver = pnp::Solver::new(fw as f64, fh as f64, cfg.fov as f64);
@@ -166,18 +232,34 @@ fn track(
     let mut fps = 0.0f32;
     let mut last_pose = HeadPose::default();
 
+    let mut last_seq = 0u64;
     while !stop.load(Ordering::Relaxed) {
-        let frame = match camera.frame() {
-            Ok(f) => f,
-            Err(e) => {
-                set_status(shared, |s| s.camera_ok = false);
-                return Err(format!("Camera stopped: {e}"));
+        // Grab the newest frame, waiting briefly if none arrived yet.
+        let rgb: Vec<u8> = {
+            let guard = slot.frame.lock().unwrap();
+            let (guard, _) = slot
+                .ready
+                .wait_timeout_while(guard, Duration::from_millis(250), |f| {
+                    !matches!(f, Some((seq, _)) if *seq > last_seq)
+                })
+                .unwrap();
+            let mut guard = guard;
+            match guard.take() {
+                Some((seq, rgb)) => {
+                    last_seq = seq;
+                    rgb
+                }
+                None => {
+                    if let Some(e) = cam_fail.lock().unwrap().take() {
+                        set_status(shared, |s| s.camera_ok = false);
+                        let _ = capture.join();
+                        return Err(e);
+                    }
+                    continue;
+                }
             }
         };
-        let img = frame
-            .decode_image::<RgbFormat>()
-            .map_err(|e| format!("Could not decode camera frame: {e}"))?;
-        let rgb: &[u8] = img.as_raw();
+        let rgb: &[u8] = &rgb;
 
         let now = Instant::now();
         let dt = now.duration_since(last_frame).as_secs_f32().clamp(1e-3, 0.5);
@@ -186,10 +268,13 @@ fn track(
 
         let cfg = *settings.lock().unwrap();
 
+        // Brightness compensation so tracking still works in a dim room.
+        let gain = nn::auto_gain(rgb);
+
         // Redetect when we have no face or the landmarks have been bad a while.
         if face.is_none() || low_conf_frames > 10 {
             face = nets
-                .detect_face(rgb, fw, fh)
+                .detect_face(rgb, fw, fh, gain)
                 .map_err(|e| format!("Face detector failed: {e}"))?
                 .map(|b| b.expanded(0.1, fw, fh));
             low_conf_frames = 0;
@@ -198,7 +283,7 @@ fn track(
         let mut have_pose = false;
         if let Some(cur) = face {
             let conf = nets
-                .landmarks(rgb, fw, fh, &cur, &mut points)
+                .landmarks(rgb, fw, fh, &cur, gain, &mut points)
                 .map_err(|e| format!("Landmark model failed: {e}"))?;
 
             if conf < 0.25 {
@@ -244,13 +329,14 @@ fn track(
                 }
                 let c = center.unwrap();
 
+                // Signs tuned against BeamNG/ETS2 behaviour in live testing.
                 last_pose = HeadPose {
                     yaw: wrap_deg(sm.yaw - c.yaw) as f32 * cfg.rot_gain,
-                    pitch: wrap_deg(sm.pitch - c.pitch) as f32 * cfg.rot_gain,
+                    pitch: -wrap_deg(sm.pitch - c.pitch) as f32 * cfg.rot_gain,
                     roll: wrap_deg(sm.roll - c.roll) as f32 * cfg.rot_gain,
                     x: (sm.x - c.x) as f32 * cfg.pos_gain,
                     y: -(sm.y - c.y) as f32 * cfg.pos_gain, // camera y is down; FreeTrack Y is up
-                    z: -(sm.z - c.z) as f32 * cfg.pos_gain, // lean in = closer = positive Z
+                    z: (sm.z - c.z) as f32 * cfg.pos_gain, // lean in = closer = negative Z
                 };
                 have_pose = true;
             }
@@ -273,14 +359,17 @@ fn track(
             publish_preview(shared, rgb, fw, fh, have_pose.then_some(&points), &face);
         }
     }
+    let _ = capture.join();
     Ok(())
 }
 
-/// Map the 0..1 smoothing slider onto One Euro parameters.
+/// Map the 0..1 smoothing slider onto One Euro parameters. Higher smoothing
+/// only lowers the at-rest cutoff; beta stays high so fast head moves always
+/// cut through with little lag.
 fn smoothing_params(s: f32) -> (f32, f32) {
     let s = s.clamp(0.0, 1.0);
-    let min_cutoff = 3.0 + (0.35 - 3.0) * s;
-    let beta = 0.4 + (0.015 - 0.4) * s;
+    let min_cutoff = 3.0 + (0.4 - 3.0) * s;
+    let beta = 0.6 + (0.1 - 0.6) * s;
     (min_cutoff, beta)
 }
 
@@ -412,37 +501,40 @@ mod tests {
         let mut solver = pnp::Solver::new(fw as f64, fh as f64, 70.0);
         let mut points = [[0.0f32; 2]; LM_COUNT];
 
-        let mut img = None;
-        for i in 0..10 {
+        for i in 0..30 {
+            let t0 = Instant::now();
             let frame = camera.frame().expect("frame");
+            let t_cap = t0.elapsed().as_secs_f32() * 1e3;
+            let t0 = Instant::now();
             let decoded = frame.decode_image::<RgbFormat>().expect("decode");
+            let t_dec = t0.elapsed().as_secs_f32() * 1e3;
             assert_eq!(decoded.width() as usize, fw);
             let rgb: &[u8] = decoded.as_raw();
 
-            let face = nets.detect_face(rgb, fw, fh).unwrap();
+            let gain = nn::auto_gain(rgb);
+            let t0 = Instant::now();
+            let face = nets.detect_face(rgb, fw, fh, gain).unwrap();
+            let t_det = t0.elapsed().as_secs_f32() * 1e3;
             if let Some(b) = face.map(|b| b.expanded(0.1, fw, fh)) {
-                let conf = nets.landmarks(rgb, fw, fh, &b, &mut points).unwrap();
+                let t0 = Instant::now();
+                let conf = nets.landmarks(rgb, fw, fh, &b, gain, &mut points).unwrap();
+                let t_lm = t0.elapsed().as_secs_f32() * 1e3;
                 let mut obs = [[0.0f64; 2]; 18];
                 for (o, &idx) in obs.iter_mut().zip(pnp::CONTOUR_IDX.iter()) {
                     o[0] = points[idx][0] as f64;
                     o[1] = points[idx][1] as f64;
                 }
+                let t0 = Instant::now();
                 let pose = solver.solve(&obs);
+                let t_solve = t0.elapsed().as_secs_f32() * 1e3;
                 println!(
-                    "frame {i}: face conf {conf:.2}  yaw {:+.1} pitch {:+.1} roll {:+.1} z {:.0}cm",
+                    "frame {i}: cap {t_cap:.0} dec {t_dec:.0} det {t_det:.0} lm {t_lm:.0} solve {t_solve:.1} ms  conf {conf:.2}  yaw {:+.1} pitch {:+.1} roll {:+.1} z {:.0}cm",
                     pose.yaw, pose.pitch, pose.roll, pose.z
                 );
             } else {
-                println!("frame {i}: no face");
+                println!("frame {i}: no face (cap {t_cap:.0} dec {t_dec:.0} det {t_det:.0} ms, gain {gain:.1})");
             }
-            img = Some(decoded);
         }
-
-        let out = image::RgbImage::from_raw(fw as u32, fh as u32, img.unwrap().into_raw())
-            .unwrap();
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/target/camera_smoke.png");
-        out.save(path).unwrap();
-        println!("saved {path}");
     }
 }
 
