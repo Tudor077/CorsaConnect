@@ -8,7 +8,9 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod freetrack;
 mod gui;
+mod headtracker;
 mod motionsim;
 mod outgauge;
 mod protocol;

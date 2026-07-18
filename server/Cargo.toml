@@ -12,6 +12,8 @@ path = "src/main.rs"
 vigem-client = "0.1"
 eframe = "0.29"
 image = { version = "0.25", default-features = false, features = ["png"] }
+tract-onnx = "0.21"
+nokhwa = { version = "0.10", features = ["input-msmf"] }
 
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"

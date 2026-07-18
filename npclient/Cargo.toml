@@ -1,0 +1,17 @@
+[package]
+name = "npclient"
+version = "0.1.0"
+edition = "2021"
+description = "CorsaConnect NPClient64.dll: TrackIR interface emulation, reads FreeTrack shared memory"
+
+[lib]
+name = "NPClient64"
+crate-type = ["cdylib"]
+
+[[bin]]
+name = "TrackIR"
+path = "src/bin/trackir.rs"
+
+[profile.release]
+opt-level = "s"
+lto = true

@@ -52,6 +52,8 @@ pub struct Shared {
     logs: Mutex<VecDeque<String>>,
     pub status: Mutex<Status>,
     motion: Mutex<MotionState>,
+    /// Head tracking status/preview (runs on its own thread).
+    pub head: crate::headtracker::HeadShared,
 }
 
 impl Shared {
@@ -64,6 +66,7 @@ impl Shared {
                 impact: 0.0,
                 impact_at: Instant::now(),
             }),
+            head: crate::headtracker::HeadShared::default(),
         })
     }
 

@@ -1,0 +1,5 @@
+# Some Windows setups can't reach the cert revocation server, which makes
+# `cargo build` fail with CRYPT_E_NO_REVOCATION_CHECK. Skip the revocation
+# check for crates.io downloads.
+[http]
+check-revoke = false
