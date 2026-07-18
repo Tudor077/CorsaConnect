@@ -30,7 +30,12 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.rotate
 import kotlinx.coroutines.delay
+import kotlin.math.atan2
+import kotlin.math.min
 import kotlin.math.roundToInt
 
 /** Edit-mode snap grid: number of square cells down the screen height. */
@@ -47,6 +52,9 @@ class MainActivity : ComponentActivity() {
     @Volatile private var brake = 0
     @Volatile private var clutch = 0
     @Volatile private var buttonsState = 0
+    // On-screen wheel: -1..1 written by the wheel widget, read when useWheel is on.
+    @Volatile private var wheelSteer = 0f
+    @Volatile private var useWheel = false
 
     // For haptics: OR of the masks of buttons flagged as gear shifts, and whether
     // telemetry is expected to be flowing (i.e. we're connected).
@@ -90,6 +98,8 @@ class MainActivity : ComponentActivity() {
         steering.sensitivity = c.sensitivity
         steering.deadZone = c.deadZone
         steering.maxAngleRad = Math.toRadians(c.maxAngleDeg.toDouble()).toFloat()
+        steering.useGyro = c.gyroSteer && steering.hasGyro
+        useWheel = c.touchWheel
         haptics.settings = c.hapticSettings()
     }
 
@@ -99,7 +109,9 @@ class MainActivity : ComponentActivity() {
             serverIp = ip,
             inputProvider = {
                 Protocol.Input(
-                    steer = steering.steerShort(),
+                    steer = if (useWheel)
+                        (wheelSteer.coerceIn(-1f, 1f) * Short.MAX_VALUE).toInt().toShort()
+                    else steering.steerShort(),
                     throttle = throttle,
                     brake = brake,
                     clutch = clutch,
@@ -129,10 +141,15 @@ class MainActivity : ComponentActivity() {
         var showPresets by remember { mutableStateOf(false) }
         var showDesigns by remember { mutableStateOf(false) }
         var steerDisplay by remember { mutableStateOf(0f) }
+        // Bumped to snap the on-screen wheel back to centre (re-center menu item).
+        var wheelReset by remember { mutableStateOf(0) }
 
         LaunchedEffect(config) { applyTuning(config) }
         LaunchedEffect(Unit) {
-            while (true) { steerDisplay = steering.steerNormalized(); delay(33) }
+            while (true) {
+                steerDisplay = if (config.touchWheel) wheelSteer else steering.steerNormalized()
+                delay(33)
+            }
         }
         // Keep the set of "shift" button masks current so grind feedback knows
         // which presses count as a gear change.
@@ -257,7 +274,7 @@ class MainActivity : ComponentActivity() {
                                 ),
                             contentAlignment = Alignment.Center,
                         ) {
-                            ElementContent(el, editMode, steerDisplay, config)
+                            ElementContent(el, editMode, steerDisplay, config, wheelReset) { wheelSteer = it }
 
                             if (editMode) {
                                 // Resize handle, bottom-right.
@@ -311,7 +328,9 @@ class MainActivity : ComponentActivity() {
                         onDesigns = { showDesigns = true },
                         onEdit = { editMode = true },
                         onSettings = { showSettings = true },
-                        onCenter = { steering.calibrate() },
+                        onCenter = {
+                            if (config.touchWheel) { wheelSteer = 0f; wheelReset++ } else steering.calibrate()
+                        },
                         onDisconnect = { disconnect(); connected = false },
                         modifier = Modifier.align(Alignment.TopStart),
                     )
@@ -392,7 +411,14 @@ class MainActivity : ComponentActivity() {
 
     /** Renders the live content of an element (drive mode wires up interaction). */
     @Composable
-    private fun ElementContent(el: Element, editMode: Boolean, steerDisplay: Float, config: Config) {
+    private fun ElementContent(
+        el: Element,
+        editMode: Boolean,
+        steerDisplay: Float,
+        config: Config,
+        wheelReset: Int,
+        onWheelSteer: (Float) -> Unit,
+    ) {
         val t = latestTelemetry
         val lcd = config.design == Design.VAPOR
         when (el.type) {
@@ -413,6 +439,13 @@ class MainActivity : ComponentActivity() {
                 ReadoutOf(lcd, fmtTemp(t.engineTemp, config.imperial), tempUnit(config.imperial), cells = 3)
             ControlType.DASH_LIGHTS -> DashLights(t.showLights, lcd)
             ControlType.STEERING_BAR -> SteeringBar(steerDisplay, lcd)
+            ControlType.STEERING_WHEEL -> SteeringWheel(
+                maxAngleRad = Math.toRadians(config.maxAngleDeg.toDouble()).toFloat(),
+                resetKey = wheelReset,
+                enabled = !editMode,
+                lcd = lcd,
+                onSteer = onWheelSteer,
+            )
             ControlType.GAS -> PedalButton(el.label, if (lcd) LCD_BG else Color(0xFF1F7A2E), enabled = !editMode, lcd = lcd) {
                 throttle = if (it) 255 else 0
             }
@@ -539,6 +572,68 @@ private fun SteeringBar(steer: Float, lcd: Boolean = false) {
                     .size(width = 8.dp, height = 18.dp).clip(RoundedCornerShape(if (lcd) 0.dp else 4.dp))
                     .background(if (lcd) LCD_DARK else Color(0xFF4C8DFF)),
             )
+        }
+    }
+}
+
+/**
+ * On-screen steering wheel. Drag anywhere on it in a circular motion to rotate;
+ * the wheel holds its position when you lift your finger (like a real wheel with
+ * no force feedback). Rotation is clamped to [maxAngleRad] each way and reported
+ * as -1..1 via [onSteer]. [resetKey] snaps it back to centre when it changes.
+ */
+@Composable
+private fun SteeringWheel(
+    maxAngleRad: Float,
+    resetKey: Int,
+    enabled: Boolean,
+    lcd: Boolean = false,
+    onSteer: (Float) -> Unit,
+) {
+    val haptic = LocalHapticFeedback.current
+    var rotation by remember(resetKey) { mutableStateOf(0f) }
+    var lastTouch by remember { mutableStateOf(0f) }
+
+    val rim = if (lcd) LCD_DARK else Color(0xFF3A3A44)
+    val face = if (lcd) LCD_BG else Color(0xFF23232B)
+    val spoke = if (lcd) LCD_DARK else Color(0xFF4C8DFF)
+
+    Canvas(
+        Modifier.fillMaxSize().then(
+            if (enabled) Modifier.pointerInput(maxAngleRad) {
+                val center = Offset(size.width / 2f, size.height / 2f)
+                detectDragGestures(
+                    onDragStart = { pos ->
+                        lastTouch = atan2(pos.y - center.y, pos.x - center.x)
+                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                    },
+                    onDrag = { change, _ ->
+                        val a = atan2(change.position.y - center.y, change.position.x - center.x)
+                        var d = a - lastTouch
+                        while (d > Math.PI) d -= (2 * Math.PI).toFloat()
+                        while (d < -Math.PI) d += (2 * Math.PI).toFloat()
+                        lastTouch = a
+                        rotation = (rotation + d).coerceIn(-maxAngleRad, maxAngleRad)
+                        onSteer(rotation / maxAngleRad)
+                        change.consume()
+                    },
+                )
+            } else Modifier,
+        ),
+    ) {
+        val r = min(size.width, size.height) / 2f * 0.92f
+        val c = Offset(size.width / 2f, size.height / 2f)
+        rotate(degrees = Math.toDegrees(rotation.toDouble()).toFloat(), pivot = c) {
+            drawCircle(face, radius = r, center = c)
+            drawCircle(rim, radius = r, center = c, style = Stroke(width = r * 0.14f))
+            drawCircle(rim, radius = r * 0.20f, center = c) // hub
+            // Three spokes (left, right, bottom) like a race wheel.
+            val sw = r * 0.10f
+            drawLine(spoke, c, Offset(c.x - r, c.y), strokeWidth = sw, cap = StrokeCap.Round)
+            drawLine(spoke, c, Offset(c.x + r, c.y), strokeWidth = sw, cap = StrokeCap.Round)
+            drawLine(spoke, c, Offset(c.x, c.y + r), strokeWidth = sw, cap = StrokeCap.Round)
+            // Top marker so the centre is obvious.
+            drawCircle(spoke, radius = r * 0.09f, center = Offset(c.x, c.y - r * 0.86f))
         }
     }
 }
@@ -840,6 +935,7 @@ private fun EditBar(
                     "Gear" to ControlType.GEAR_TEXT,
                     "Speed text" to ControlType.SPEED_TEXT,
                     "Steering bar" to ControlType.STEERING_BAR,
+                    "Steering wheel" to ControlType.STEERING_WHEEL,
                     "Turbo" to ControlType.TURBO,
                     "Fuel" to ControlType.FUEL,
                     "Engine temp" to ControlType.ENGINE_TEMP,
@@ -994,16 +1090,30 @@ private fun SettingsDialog(
                 UnitsRow(c.imperial) { c = c.copy(imperial = it) }
 
                 SettingsHeader("Steering")
-                SliderRow("Sensitivity", c.sensitivity, 0.3f, 2.5f) { c = c.copy(sensitivity = it) }
-                SliderRow("Dead zone", c.deadZone, 0f, 0.2f) { c = c.copy(deadZone = it) }
-                SliderRow("Max steering angle°", c.maxAngleDeg, 30f, 180f) { c = c.copy(maxAngleDeg = it) }
+                SwitchRow("On-screen wheel (touch, no sensors)", c.touchWheel) { c = c.copy(touchWheel = it) }
+                if (!c.touchWheel) {
+                    SliderRow("Sensitivity", c.sensitivity, 0.3f, 2.5f) { c = c.copy(sensitivity = it) }
+                    SliderRow("Dead zone", c.deadZone, 0f, 0.2f) { c = c.copy(deadZone = it) }
+                    SwitchRow("Gyro + accel wheel (900°/1080°)", c.gyroSteer) { on ->
+                        // Leaving gyro mode: gravity wraps at 180°, so clamp the lock angle.
+                        c = c.copy(gyroSteer = on, maxAngleDeg = if (on) c.maxAngleDeg else c.maxAngleDeg.coerceAtMost(180f))
+                    }
+                }
+                // Gyro and the touch wheel can exceed 180° (up to 540 each way = a
+                // 1080° wheel); gravity mode wraps at 180°, so cap it there.
+                val bigRange = c.gyroSteer || c.touchWheel
+                val angleMax = if (bigRange) 540f else 180f
+                SliderRow(
+                    if (bigRange) "Lock angle° (½ of full range)" else "Max steering angle°",
+                    c.maxAngleDeg.coerceAtMost(angleMax), 30f, angleMax, integer = true,
+                ) { c = c.copy(maxAngleDeg = it) }
 
                 SettingsHeader("Gauges")
-                SliderRow("Speedo max (km/h)", c.maxSpeed, 100f, 400f) { c = c.copy(maxSpeed = it) }
+                SliderRow("Speedo max (km/h)", c.maxSpeed, 100f, 400f, integer = true) { c = c.copy(maxSpeed = it) }
                 SwitchRow("Auto RPM (per car)", c.autoRpm) { c = c.copy(autoRpm = it) }
                 if (!c.autoRpm) {
-                    SliderRow("Tacho max rpm", c.maxRpm, 4000f, 12000f) { c = c.copy(maxRpm = it) }
-                    SliderRow("Redline rpm", c.redlineRpm, 2000f, 12000f) { c = c.copy(redlineRpm = it) }
+                    SliderRow("Tacho max rpm", c.maxRpm, 4000f, 12000f, integer = true) { c = c.copy(maxRpm = it) }
+                    SliderRow("Redline rpm", c.redlineRpm, 2000f, 12000f, integer = true) { c = c.copy(redlineRpm = it) }
                 }
                 ToggleRow("Gauges", c.digitalGauges) { c = c.copy(digitalGauges = it) }
 
@@ -1061,9 +1171,21 @@ private fun ToggleRow(label: String, digital: Boolean, onChange: (Boolean) -> Un
 }
 
 @Composable
-private fun SliderRow(label: String, value: Float, min: Float, max: Float, onChange: (Float) -> Unit) {
+private fun SliderRow(
+    label: String,
+    value: Float,
+    min: Float,
+    max: Float,
+    integer: Boolean = false,
+    onChange: (Float) -> Unit,
+) {
     Column {
-        Text("$label: ${"%.2f".format(value)}", fontSize = 12.sp, color = Color(0xFFB0B0B8))
-        Slider(value = value, onValueChange = onChange, valueRange = min..max)
+        val shown = if (integer) "%.0f".format(value) else "%.2f".format(value)
+        Text("$label: $shown", fontSize = 12.sp, color = Color(0xFFB0B0B8))
+        Slider(
+            value = value,
+            onValueChange = { onChange(if (integer) it.roundToInt().toFloat() else it) },
+            valueRange = min..max,
+        )
     }
 }

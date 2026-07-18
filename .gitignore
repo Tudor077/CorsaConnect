@@ -26,3 +26,10 @@ __pycache__/
 # OS
 Thumbs.db
 .DS_Store
+
+# IDE junk from opening the wrong folder
+/android/app/.gradle/
+/android/app/.idea/
+
+# Rust (npclient crate)
+/npclient/target/

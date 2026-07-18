@@ -8,6 +8,7 @@ import java.util.UUID
 /** Kinds of things that can sit on the HUD. */
 enum class ControlType {
     STEERING_BAR,    // visual indicator of the gyro steering
+    STEERING_WHEEL,  // on-screen wheel: drag to rotate, no motion sensors
     GAS,             // hold -> throttle (right trigger), on/off
     BRAKE,           // hold -> brake (left trigger), on/off
     THROTTLE_SLIDER, // vertical analog pedal -> throttle (right trigger)
@@ -93,6 +94,7 @@ data class Element(
             val (w, h) = when (type) {
                 ControlType.SPEEDOMETER, ControlType.TACHOMETER -> 0.18f to 0.45f
                 ControlType.STEERING_BAR -> 0.5f to 0.06f
+                ControlType.STEERING_WHEEL -> 0.28f to 0.55f
                 ControlType.GEAR_TEXT, ControlType.SPEED_TEXT -> 0.1f to 0.18f
                 ControlType.TURBO -> 0.14f to 0.34f
                 ControlType.FUEL, ControlType.ENGINE_TEMP -> 0.12f to 0.16f
@@ -137,6 +139,8 @@ data class Config(
     val sensitivity: Float = 1f,
     val deadZone: Float = 0.04f,
     val maxAngleDeg: Float = 90f,
+    val gyroSteer: Boolean = false,     // integrate the gyro so the wheel can exceed 180 degrees (e.g. 900)
+    val touchWheel: Boolean = false,    // steer from the on-screen wheel widget instead of motion sensors
     val maxSpeed: Float = 260f,
     val maxRpm: Float = 8000f,
     val redlineRpm: Float = 6500f,      // where the rpm gauge turns red; match BeamNG per car
@@ -173,6 +177,8 @@ data class Config(
         put("sensitivity", sensitivity.toDouble())
         put("deadZone", deadZone.toDouble())
         put("maxAngleDeg", maxAngleDeg.toDouble())
+        put("gyroSteer", gyroSteer)
+        put("touchWheel", touchWheel)
         put("maxSpeed", maxSpeed.toDouble())
         put("maxRpm", maxRpm.toDouble())
         put("redlineRpm", redlineRpm.toDouble())
@@ -201,6 +207,8 @@ data class Config(
                 sensitivity = o.optDouble("sensitivity", 1.0).toFloat(),
                 deadZone = o.optDouble("deadZone", 0.04).toFloat(),
                 maxAngleDeg = o.optDouble("maxAngleDeg", 90.0).toFloat(),
+                gyroSteer = o.optBoolean("gyroSteer", false),
+                touchWheel = o.optBoolean("touchWheel", false),
                 maxSpeed = o.optDouble("maxSpeed", 260.0).toFloat(),
                 maxRpm = o.optDouble("maxRpm", 8000.0).toFloat(),
                 redlineRpm = o.optDouble("redlineRpm", 6500.0).toFloat(),
