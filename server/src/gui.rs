@@ -229,8 +229,18 @@ impl eframe::App for App {
             frame_card(ui, |ui| {
                 dot_row(ui, "ViGEmBus (virtual controller)", status.vigem_ok);
                 dot_row(ui, "Phone connected", status.phone.is_some());
-                dot_row(ui, "BeamNG telemetry", status.beamng);
-                dot_row(ui, "MotionSim (slide + crash)", status.motion);
+                match self.game {
+                    Game::BeamNg => {
+                        dot_row(ui, "BeamNG telemetry", status.beamng);
+                        dot_row(ui, "MotionSim (slide + crash)", status.motion);
+                    }
+                    Game::TruckSim => {
+                        dot_row(ui, "Truck telemetry (SCS plugin)", status.beamng);
+                    }
+                    Game::Wrc10 => {
+                        dot_row(ui, "Telemetry (not wired for WRC 10 yet)", false);
+                    }
+                }
                 if let Some((spd, rpm, gear)) = status.last {
                     ui.add_space(2.0);
                     ui.label(
@@ -394,6 +404,18 @@ impl App {
                 slider_row(ui, "Position gain", &mut settings.pos_gain, 0.0..=3.0, "x");
                 ui.add_enabled_ui(!self.head.running, |ui| {
                     slider_row(ui, "Camera FOV", &mut settings.fov, 40.0..=110.0, "\u{00B0}");
+                });
+
+                ui.collapsing("Axes", |ui| {
+                    egui::Grid::new("head_axes").spacing([16.0, 4.0]).show(ui, |ui| {
+                        for (i, name) in headtracker::AXIS_NAMES.iter().enumerate() {
+                            ui.checkbox(&mut settings.axis_on[i], *name);
+                            ui.add_enabled_ui(settings.axis_on[i], |ui| {
+                                ui.checkbox(&mut settings.axis_mirror[i], "Mirror");
+                            });
+                            ui.end_row();
+                        }
+                    });
                 });
             }
 

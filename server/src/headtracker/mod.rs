@@ -34,7 +34,13 @@ pub struct Settings {
     pub rot_gain: f32,
     /// Multiplier on x/y/z movement; 0 disables position.
     pub pos_gain: f32,
+    /// Per-axis enable, in [AXIS_NAMES] order: yaw, pitch, roll, x, y, z.
+    pub axis_on: [bool; 6],
+    /// Per-axis mirror (flips the direction).
+    pub axis_mirror: [bool; 6],
 }
+
+pub const AXIS_NAMES: [&str; 6] = ["Yaw", "Pitch", "Roll", "Move X", "Move Y", "Move Z"];
 
 impl Default for Settings {
     fn default() -> Settings {
@@ -44,6 +50,8 @@ impl Default for Settings {
             smoothing: 0.4,
             rot_gain: 2.5,
             pos_gain: 1.0,
+            axis_on: [true; 6],
+            axis_mirror: [false; 6],
         }
     }
 }
@@ -329,14 +337,25 @@ fn track(
                 }
                 let c = center.unwrap();
 
-                // Signs tuned against BeamNG/ETS2 behaviour in live testing.
+                // Base signs tuned against BeamNG/ETS2 in live testing; the
+                // per-axis toggles let the user disable or mirror each one.
+                let axis = |i: usize, v: f32| -> f32 {
+                    if !cfg.axis_on[i] {
+                        0.0
+                    } else if cfg.axis_mirror[i] {
+                        -v
+                    } else {
+                        v
+                    }
+                };
                 last_pose = HeadPose {
-                    yaw: wrap_deg(sm.yaw - c.yaw) as f32 * cfg.rot_gain,
-                    pitch: -wrap_deg(sm.pitch - c.pitch) as f32 * cfg.rot_gain,
-                    roll: wrap_deg(sm.roll - c.roll) as f32 * cfg.rot_gain,
-                    x: (sm.x - c.x) as f32 * cfg.pos_gain,
-                    y: -(sm.y - c.y) as f32 * cfg.pos_gain, // camera y is down; FreeTrack Y is up
-                    z: (sm.z - c.z) as f32 * cfg.pos_gain, // lean in = closer = negative Z
+                    yaw: axis(0, wrap_deg(sm.yaw - c.yaw) as f32 * cfg.rot_gain),
+                    pitch: axis(1, -wrap_deg(sm.pitch - c.pitch) as f32 * cfg.rot_gain),
+                    roll: axis(2, wrap_deg(sm.roll - c.roll) as f32 * cfg.rot_gain),
+                    x: axis(3, (sm.x - c.x) as f32 * cfg.pos_gain),
+                    // Camera y is down; FreeTrack Y is up.
+                    y: axis(4, -(sm.y - c.y) as f32 * cfg.pos_gain),
+                    z: axis(5, (sm.z - c.z) as f32 * cfg.pos_gain),
                 };
                 have_pose = true;
             }

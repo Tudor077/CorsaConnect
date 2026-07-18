@@ -12,7 +12,7 @@ path = "src/main.rs"
 vigem-client = "0.1"
 eframe = "0.29"
 image = { version = "0.25", default-features = false, features = ["png"] }
-tract-onnx = "0.21"
+ort = { version = "2.0.0-rc.12", features = ["load-dynamic"] }
 nokhwa = { version = "0.10", features = ["input-msmf"] }
 
 [target.'cfg(windows)'.build-dependencies]
