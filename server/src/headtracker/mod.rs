@@ -290,21 +290,61 @@ fn track(
         let out_state = Arc::clone(&out_state);
         let game_id = Arc::clone(&game_id);
         let stop = Arc::clone(stop);
+        let settings = Arc::clone(settings);
         std::thread::spawn(move || {
             let mut writer = writer;
+            // The published pose chases the newest camera sample with a
+            // critically damped spring (the "smooth damp" used for camera
+            // follow in games): C1-continuous, natural ease-in/ease-out,
+            // no velocity jumps when a new camera frame lands.
+            let mut cur = [0.0f32; 6];
+            let mut curv = [0.0f32; 6];
+            let mut primed = false;
+            let mut last_tick = Instant::now();
             while !stop.load(Ordering::Relaxed) {
                 let (pose, vel, at) = {
                     let s = out_state.lock().unwrap();
                     (s.pose, s.vel, s.at)
                 };
-                let dt = at.elapsed().as_secs_f32().min(0.15);
+                // Target = latest sample plus a bounded velocity prediction,
+                // so the easing doesn't add lag on sustained movement.
+                let ahead = at.elapsed().as_secs_f32().min(0.15);
+                let target = [
+                    pose.yaw + vel[0] * ahead,
+                    pose.pitch + vel[1] * ahead,
+                    pose.roll + vel[2] * ahead,
+                    pose.x + vel[3] * ahead,
+                    pose.y + vel[4] * ahead,
+                    pose.z + vel[5] * ahead,
+                ];
+                if !primed {
+                    cur = target;
+                    primed = true;
+                }
+
+                let now = Instant::now();
+                let dt = now.duration_since(last_tick).as_secs_f32().clamp(1e-3, 0.1);
+                last_tick = now;
+
+                // Response time from the smoothing slider: snappy to floaty.
+                let s = settings.lock().unwrap().smoothing.clamp(0.0, 1.0);
+                let tau = 0.04 + (0.22 - 0.04) * s;
+                let omega = 2.0 / tau;
+                let decay = (-omega * dt).exp();
+                for i in 0..6 {
+                    let x = cur[i] - target[i];
+                    let temp = (curv[i] + omega * x) * dt;
+                    cur[i] = target[i] + (x + temp) * decay;
+                    curv[i] = (curv[i] - omega * temp) * decay;
+                }
+
                 let p = HeadPose {
-                    yaw: pose.yaw + vel[0] * dt,
-                    pitch: pose.pitch + vel[1] * dt,
-                    roll: pose.roll + vel[2] * dt,
-                    x: pose.x + vel[3] * dt,
-                    y: pose.y + vel[4] * dt,
-                    z: pose.z + vel[5] * dt,
+                    yaw: cur[0],
+                    pitch: cur[1],
+                    roll: cur[2],
+                    x: cur[3],
+                    y: cur[4],
+                    z: cur[5],
                 };
                 game_id.store(writer.write(p), Ordering::Relaxed);
                 std::thread::sleep(Duration::from_millis(10));
@@ -516,13 +556,14 @@ fn track(
     Ok(())
 }
 
-/// Map the 0..1 smoothing slider onto One Euro parameters. Higher smoothing
-/// only lowers the at-rest cutoff; beta stays high so fast head moves always
-/// cut through with little lag.
+/// Map the 0..1 smoothing slider onto One Euro parameters. Kept light: this
+/// stage only tames landmark jitter per sample - the natural easing between
+/// samples comes from the critically damped spring in the output thread,
+/// which the same slider also drives.
 fn smoothing_params(s: f32) -> (f32, f32) {
     let s = s.clamp(0.0, 1.0);
-    let min_cutoff = 3.0 + (0.4 - 3.0) * s;
-    let beta = 0.6 + (0.1 - 0.6) * s;
+    let min_cutoff = 4.0 + (1.0 - 4.0) * s;
+    let beta = 0.6 + (0.2 - 0.6) * s;
     (min_cutoff, beta)
 }
 
