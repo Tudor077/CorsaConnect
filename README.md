@@ -1,10 +1,12 @@
 # CorsaConnect
 
 Turn an Android phone into a gyroscopic steering wheel **and** a live dashboard
-for your racing games. The phone tilts to steer and works as a controller in any
-game; for games that support telemetry it also shows live speed / RPM / gear and
-gives the wheel force feedback. Telemetry is wired for
-[BeamNG.drive](https://www.beamng.com/) today, with more games on the way.
+for your racing games, and your webcam into a TrackIR-style head tracker. The
+phone tilts to steer and works as a controller in any game; for games that
+support telemetry it also shows live speed / RPM / gear and gives the wheel
+force feedback. Telemetry is wired for
+[BeamNG.drive](https://www.beamng.com/) and Euro/American Truck Simulator today,
+with more games on the way.
 
 ```
 ┌─────────────── ANDROID (Kotlin) ───────────────┐
@@ -15,6 +17,7 @@ gives the wheel force feedback. Telemetry is wired for
        ▼                                │
 ┌──────────────── PC SERVER (Rust) ─────┴──────────┐
 │  • ViGEmBus: virtual Xbox 360 pad  -> any game   │
+│  • Webcam head tracking -> TrackIR -> any game    │
 │  • OutGauge  UDP :4444 -> parsed -> phone dash    │
 │  • MotionSim UDP :4445 -> slide + crash -> wheel  │
 └──────────────────────────────────────────────────┘
@@ -44,6 +47,23 @@ move in BeamNG or Windows' "Set up USB game controllers"):
 ```sh
 cargo run --example test_client
 ```
+
+## Head tracking (webcam → TrackIR)
+
+The **HEAD TRACKING** card in the launcher turns any webcam into a head
+tracker for games that support TrackIR (BeamNG, ETS2/ATS, and hundreds more) —
+no opentrack or extra installs. Everything ships inside the exe: face detection
+and 66-point landmarks run on ONNX Runtime, a PnP solver turns them into a 6DoF
+pose, and the launcher installs its own `NPClient64.dll` + registry key that
+TrackIR games discover automatically.
+
+Start tracking **before** launching the game, switch to the interior camera,
+and press **Center** with your head in its neutral position. Sliders tune
+smoothing (a critically damped spring — natural easing) and rotation/position
+gain; the **Axes** menu can disable or mirror any of the six axes. **Low light
+boost** forces a short camera exposure so tracking stays at full frame rate in
+a dark room, backing off automatically if it gets too dark to see you. The
+camera preview shows exactly what the tracker sees, landmarks included.
 
 ## BeamNG setup
 
