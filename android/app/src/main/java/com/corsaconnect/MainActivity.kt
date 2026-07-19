@@ -73,6 +73,14 @@ class MainActivity : ComponentActivity() {
      *  system UI; a swipe from the edge peeks them temporarily. */
     private fun enterImmersiveMode() {
         WindowCompat.setDecorFitsSystemWindows(window, false)
+        if (android.os.Build.VERSION.SDK_INT >= 28) {
+            // Draw into the camera cutout area too, otherwise the system
+            // letterboxes it with a black band once the bars are hidden.
+            window.attributes = window.attributes.apply {
+                layoutInDisplayCutoutMode =
+                    WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+            }
+        }
         WindowInsetsControllerCompat(window, window.decorView).apply {
             hide(WindowInsetsCompat.Type.systemBars())
             systemBarsBehavior =
