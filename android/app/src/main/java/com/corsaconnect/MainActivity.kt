@@ -2,8 +2,13 @@ package com.corsaconnect
 
 import android.os.Bundle
 import android.view.WindowManager
+import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -64,9 +69,26 @@ class MainActivity : ComponentActivity() {
     private var network: NetworkService? = null
     private var latestTelemetry by mutableStateOf(Protocol.Telemetry())
 
+    /** Sticky immersive fullscreen: no status/nav bars, no accidental taps on
+     *  system UI; a swipe from the edge peeks them temporarily. */
+    private fun enterImmersiveMode() {
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        WindowInsetsControllerCompat(window, window.decorView).apply {
+            hide(WindowInsetsCompat.Type.systemBars())
+            systemBarsBehavior =
+                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        }
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) enterImmersiveMode()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        enterImmersiveMode()
         steering = SteeringSensor(this)
         store = ConfigStore(this)
         haptics = HapticsEngine(this) {
@@ -143,6 +165,37 @@ class MainActivity : ComponentActivity() {
         var steerDisplay by remember { mutableStateOf(0f) }
         // Bumped to snap the on-screen wheel back to centre (re-center menu item).
         var wheelReset by remember { mutableStateOf(0) }
+        var lastBackPress by remember { mutableStateOf(0L) }
+
+        // Back: close whatever is open first; otherwise ask for a second
+        // press within 2 s before disconnecting (or leaving the app).
+        BackHandler {
+            when {
+                selected != null -> selected = null
+                editMode -> editMode = false
+                showSettings || showPresets || showDesigns -> {
+                    showSettings = false; showPresets = false; showDesigns = false
+                }
+                else -> {
+                    val now = System.currentTimeMillis()
+                    if (now - lastBackPress < 2000L) {
+                        if (connected) {
+                            disconnect(); connected = false
+                        } else {
+                            finish()
+                        }
+                    } else {
+                        lastBackPress = now
+                        Toast.makeText(
+                            this@MainActivity,
+                            if (connected) "Press back again to disconnect"
+                            else "Press back again to exit",
+                            Toast.LENGTH_SHORT,
+                        ).show()
+                    }
+                }
+            }
+        }
 
         LaunchedEffect(config) { applyTuning(config) }
         LaunchedEffect(Unit) {
