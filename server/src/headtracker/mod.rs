@@ -42,6 +42,11 @@ pub struct Settings {
     /// Force short manual exposure + hardware gain so the camera keeps full
     /// frame rate in a dark room (the usual cause of tracking lag).
     pub low_light: bool,
+    /// Also send the pose to opentrack (UDP 127.0.0.1:4242). Anti-cheat
+    /// games (BattlEye etc.) only load whitelisted TrackIR DLLs, so for
+    /// those let opentrack do the delivery: set its Input to "UDP over
+    /// network" and its Output to "freetrack 2.0 Enhanced".
+    pub opentrack_udp: bool,
 }
 
 pub const AXIS_NAMES: [&str; 6] = ["Yaw", "Pitch", "Roll", "Move X", "Move Y", "Move Z"];
@@ -57,6 +62,7 @@ impl Default for Settings {
             axis_on: [true; 6],
             axis_mirror: [false; 6],
             low_light: true,
+            opentrack_udp: false,
         }
     }
 }
@@ -293,6 +299,10 @@ fn track(
         let settings = Arc::clone(settings);
         std::thread::spawn(move || {
             let mut writer = writer;
+            // Optional opentrack feed (its NPClient is whitelisted by
+            // anti-cheats): 6 little-endian doubles, x/y/z cm then
+            // yaw/pitch/roll degrees, to 127.0.0.1:4242.
+            let opentrack_sock = std::net::UdpSocket::bind(("0.0.0.0", 0)).ok();
             // The published pose chases the newest camera sample with a
             // critically damped spring (the "smooth damp" used for camera
             // follow in games): C1-continuous, natural ease-in/ease-out,
@@ -327,7 +337,10 @@ fn track(
                 last_tick = now;
 
                 // Response time from the smoothing slider: snappy to floaty.
-                let s = settings.lock().unwrap().smoothing.clamp(0.0, 1.0);
+                let (s, to_opentrack) = {
+                    let cfg = settings.lock().unwrap();
+                    (cfg.smoothing.clamp(0.0, 1.0), cfg.opentrack_udp)
+                };
                 let tau = 0.04 + (0.22 - 0.04) * s;
                 let omega = 2.0 / tau;
                 let decay = (-omega * dt).exp();
@@ -347,6 +360,20 @@ fn track(
                     z: cur[5],
                 };
                 game_id.store(writer.write(p), Ordering::Relaxed);
+
+                if to_opentrack {
+                    if let Some(sock) = &opentrack_sock {
+                        let mut pkt = [0u8; 48];
+                        for (i, v) in [p.x, p.y, p.z, p.yaw, p.pitch, p.roll]
+                            .into_iter()
+                            .enumerate()
+                        {
+                            pkt[i * 8..i * 8 + 8]
+                                .copy_from_slice(&(v as f64).to_le_bytes());
+                        }
+                        let _ = sock.send_to(&pkt, ("127.0.0.1", 4242));
+                    }
+                }
                 std::thread::sleep(Duration::from_millis(10));
             }
             // Dropping the writer zeroes the pose for the game.

@@ -412,6 +412,12 @@ impl App {
                     slider_row(ui, "Camera FOV", &mut settings.fov, 40.0..=110.0, "\u{00B0}");
                 });
                 ui.checkbox(&mut settings.low_light, "Low light boost (full fps in a dark room)");
+                ui.checkbox(&mut settings.opentrack_udp, "Send to opentrack (UDP :4242)")
+                    .on_hover_text(
+                        "For games with anti-cheat (BattlEye/EAC) that only load \
+                         opentrack's whitelisted TrackIR DLL. In opentrack pick Input \
+                         'UDP over network' and Output 'freetrack 2.0 Enhanced'.",
+                    );
 
                 ui.collapsing("Axes", |ui| {
                     egui::Grid::new("head_axes").spacing([16.0, 4.0]).show(ui, |ui| {
