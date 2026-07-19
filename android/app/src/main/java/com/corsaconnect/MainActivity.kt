@@ -128,7 +128,10 @@ class MainActivity : ComponentActivity() {
         steering.sensitivity = c.sensitivity
         steering.deadZone = c.deadZone
         steering.maxAngleRad = Math.toRadians(c.maxAngleDeg.toDouble()).toFloat()
-        steering.useGyro = c.gyroSteer && steering.hasGyro
+        // Gyro + accel fusion is the one sensor mode (gravity-only wraps at
+        // 180° and can't do real wheel ranges); gravity remains only as the
+        // fallback for devices without a gyroscope.
+        steering.useGyro = steering.hasGyro
         useWheel = c.touchWheel
         haptics.settings = c.hapticSettings()
     }
@@ -1155,18 +1158,12 @@ private fun SettingsDialog(
                 if (!c.touchWheel) {
                     SliderRow("Sensitivity", c.sensitivity, 0.3f, 2.5f) { c = c.copy(sensitivity = it) }
                     SliderRow("Dead zone", c.deadZone, 0f, 0.2f) { c = c.copy(deadZone = it) }
-                    SwitchRow("Gyro + accel wheel (900°/1080°)", c.gyroSteer) { on ->
-                        // Leaving gyro mode: gravity wraps at 180°, so clamp the lock angle.
-                        c = c.copy(gyroSteer = on, maxAngleDeg = if (on) c.maxAngleDeg else c.maxAngleDeg.coerceAtMost(180f))
-                    }
                 }
-                // Gyro and the touch wheel can exceed 180° (up to 540 each way = a
-                // 1080° wheel); gravity mode wraps at 180°, so cap it there.
-                val bigRange = c.gyroSteer || c.touchWheel
-                val angleMax = if (bigRange) 540f else 180f
+                // Steering is gyro+accel fusion (or the touch wheel), so the
+                // lock angle can exceed 180° - up to 540 each way = a 1080° wheel.
                 SliderRow(
-                    if (bigRange) "Lock angle° (½ of full range)" else "Max steering angle°",
-                    c.maxAngleDeg.coerceAtMost(angleMax), 30f, angleMax, integer = true,
+                    "Lock angle° (½ of full range)",
+                    c.maxAngleDeg.coerceAtMost(540f), 30f, 540f, integer = true,
                 ) { c = c.copy(maxAngleDeg = it) }
 
                 SettingsHeader("Gauges")

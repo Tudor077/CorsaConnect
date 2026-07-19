@@ -139,7 +139,6 @@ data class Config(
     val sensitivity: Float = 1f,
     val deadZone: Float = 0.04f,
     val maxAngleDeg: Float = 90f,
-    val gyroSteer: Boolean = false,     // integrate the gyro so the wheel can exceed 180 degrees (e.g. 900)
     val touchWheel: Boolean = false,    // steer from the on-screen wheel widget instead of motion sensors
     val maxSpeed: Float = 260f,
     val maxRpm: Float = 8000f,
@@ -177,7 +176,6 @@ data class Config(
         put("sensitivity", sensitivity.toDouble())
         put("deadZone", deadZone.toDouble())
         put("maxAngleDeg", maxAngleDeg.toDouble())
-        put("gyroSteer", gyroSteer)
         put("touchWheel", touchWheel)
         put("maxSpeed", maxSpeed.toDouble())
         put("maxRpm", maxRpm.toDouble())
@@ -207,7 +205,6 @@ data class Config(
                 sensitivity = o.optDouble("sensitivity", 1.0).toFloat(),
                 deadZone = o.optDouble("deadZone", 0.04).toFloat(),
                 maxAngleDeg = o.optDouble("maxAngleDeg", 90.0).toFloat(),
-                gyroSteer = o.optBoolean("gyroSteer", false),
                 touchWheel = o.optBoolean("touchWheel", false),
                 maxSpeed = o.optDouble("maxSpeed", 260.0).toFloat(),
                 maxRpm = o.optDouble("maxRpm", 8000.0).toFloat(),
