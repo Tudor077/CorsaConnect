@@ -5,7 +5,7 @@
 
 use std::collections::VecDeque;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -13,6 +13,7 @@ use crate::motionsim;
 use crate::outgauge;
 use crate::protocol::{InputPacket, TelemetryPacket};
 use crate::scstelemetry;
+use crate::vjoy;
 use vigem_client::{Client, TargetId, XButtons, XGamepad, Xbox360Wired};
 
 /// Port the phone sends controller input to.
@@ -25,6 +26,24 @@ const MOTIONSIM_PORT: u16 = 4445;
 const IMPACT_DECAY: Duration = Duration::from_millis(350);
 /// Port on the phone that listens for telemetry.
 const PHONE_TELEMETRY_PORT: u16 = 5001;
+
+/// Optional second destination for the telemetry we already parse and enrich.
+///
+/// This exists because OutGauge is a single-listener protocol - the game sends
+/// to exactly one address:port, and whoever binds 4444 first gets it. Rather
+/// than fight over the port, anything else that wants the same telemetry can
+/// ask us for a copy, and gets the enriched version (learned redline, slip and
+/// impact folded in) instead of the raw packet. PicoPanel is the reason it's
+/// here; see the PICOPANEL card in the launcher.
+///
+/// The address lives in [Shared] so the launcher can switch it on and off while
+/// the server runs. `CORSACONNECT_MIRROR=127.0.0.1:5051` still seeds it at
+/// startup, which is how PicoPanel's own docs describe turning this on.
+fn env_mirror() -> Option<SocketAddr> {
+    std::env::var("CORSACONNECT_MIRROR")
+        .ok()
+        .and_then(|v| v.parse::<SocketAddr>().ok())
+}
 /// Recenter the pad if the phone goes quiet for this long; also the poll
 /// interval at which the loops notice a stop request.
 const INPUT_TIMEOUT: Duration = Duration::from_millis(250);
@@ -32,7 +51,7 @@ const INPUT_TIMEOUT: Duration = Duration::from_millis(250);
 /// Live status the GUI reads each frame.
 #[derive(Default, Clone)]
 pub struct Status {
-    pub vigem_ok: bool,
+    pub device_ok: bool, // the virtual controller (wheel or pad) is plugged in
     pub phone: Option<IpAddr>,
     pub beamng: bool,
     pub motion: bool, // MotionSim packets are flowing (slide + crash feedback)
@@ -52,6 +71,11 @@ pub struct Shared {
     logs: Mutex<VecDeque<String>>,
     pub status: Mutex<Status>,
     motion: Mutex<MotionState>,
+    /// Where to send a copy of every telemetry packet, if anywhere. See
+    /// [env_mirror]; the launcher can change this while the server runs.
+    mirror: Mutex<Option<SocketAddr>>,
+    /// How many copies have gone out, so the GUI can show the link is alive.
+    mirror_sent: AtomicU64,
     /// Head tracking status/preview (runs on its own thread).
     pub head: crate::headtracker::HeadShared,
 }
@@ -66,6 +90,8 @@ impl Shared {
                 impact: 0.0,
                 impact_at: Instant::now(),
             }),
+            mirror: Mutex::new(env_mirror()),
+            mirror_sent: AtomicU64::new(0),
             head: crate::headtracker::HeadShared::default(),
         })
     }
@@ -103,6 +129,31 @@ impl Shared {
 
     pub fn status(&self) -> Status {
         self.status.lock().unwrap().clone()
+    }
+
+    /// Where telemetry copies go, or `None` when mirroring is off.
+    pub fn mirror(&self) -> Option<SocketAddr> {
+        *self.mirror.lock().unwrap()
+    }
+
+    /// Point the mirror somewhere else, or turn it off with `None`. Takes
+    /// effect on the next packet - no restart, nothing to re-bind.
+    pub fn set_mirror(&self, addr: Option<SocketAddr>) {
+        *self.mirror.lock().unwrap() = addr;
+    }
+
+    /// Telemetry packets copied to the mirror so far.
+    pub fn mirror_sent(&self) -> u64 {
+        self.mirror_sent.load(Ordering::Relaxed)
+    }
+
+    /// Send one already-encoded packet to the mirror, if it's on.
+    fn send_mirror(&self, tx: &UdpSocket, packet: &[u8]) {
+        if let Some(a) = self.mirror() {
+            if tx.send_to(packet, a).is_ok() {
+                self.mirror_sent.fetch_add(1, Ordering::Relaxed);
+            }
+        }
     }
 
     fn set_status(&self, f: impl FnOnce(&mut Status)) {
@@ -172,35 +223,122 @@ impl Game {
     }
 }
 
+/// What the phone shows up as on the PC.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum DeviceMode {
+    /// A vJoy DirectInput joystick: steering on its own 15-bit axis, a separate
+    /// axis per pedal. Not an XInput device, so it never collides with a real
+    /// Xbox pad - both can stay bound in the game at the same time.
+    Wheel,
+    /// The classic virtual Xbox 360 pad through ViGEmBus, for games that only
+    /// read XInput. Plugging in a real Xbox pad alongside it means fighting
+    /// over controller slots, so it's no longer the default.
+    Xbox360,
+}
+
+impl DeviceMode {
+    pub const ALL: [DeviceMode; 2] = [DeviceMode::Wheel, DeviceMode::Xbox360];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            DeviceMode::Wheel => "Racing wheel (vJoy)",
+            DeviceMode::Xbox360 => "Xbox 360 pad (ViGEmBus)",
+        }
+    }
+
+    /// Label for the status dot.
+    pub fn dot(self) -> &'static str {
+        match self {
+            DeviceMode::Wheel => "vJoy wheel",
+            DeviceMode::Xbox360 => "ViGEmBus (virtual controller)",
+        }
+    }
+
+    pub fn hint(self) -> &'static str {
+        match self {
+            DeviceMode::Wheel => {
+                "Own DirectInput device - bind it in-game as a wheel. Coexists with a real \
+                 Xbox pad, so you never have to rebind. Needs the vJoy driver."
+            }
+            DeviceMode::Xbox360 => {
+                "A second Xbox pad: works everywhere, but XInput games index pads by slot, \
+                 so a real Xbox pad plugged in at the same time fights it. Needs ViGEmBus."
+            }
+        }
+    }
+}
+
+/// The virtual device we feed, whichever backend is in use.
+enum Pad {
+    Wheel(vjoy::Wheel),
+    Xbox(Xbox360Wired<Client>),
+}
+
+impl Pad {
+    fn update(&mut self, input: &InputPacket) {
+        match self {
+            Pad::Wheel(w) => w.update(input),
+            Pad::Xbox(p) => {
+                let _ = p.update(&to_gamepad(input));
+            }
+        }
+    }
+
+    /// Wheel centered, pedals up - what we send when the phone goes quiet.
+    fn center(&mut self) {
+        match self {
+            Pad::Wheel(w) => w.center(),
+            Pad::Xbox(p) => {
+                let _ = p.update(&XGamepad::default());
+            }
+        }
+    }
+}
+
+/// Bring up the virtual device for `mode`, logging what the game will see.
+fn open_device(shared: &Arc<Shared>, mode: DeviceMode) -> Result<Pad, String> {
+    match mode {
+        DeviceMode::Wheel => {
+            let (wheel, notes) = vjoy::Wheel::open(vjoy::DEVICE_ID).map_err(|e| {
+                format!("{e} Install vJoy from https://github.com/njz3/vJoy/releases, or switch to Xbox 360 pad mode.")
+            })?;
+            shared.log("Virtual racing wheel ready (vJoy).");
+            for n in notes {
+                shared.log(n);
+            }
+            Ok(Pad::Wheel(wheel))
+        }
+        DeviceMode::Xbox360 => {
+            let client = Client::connect().map_err(|e| {
+                format!("Could not connect to ViGEmBus ({e}). Install the ViGEmBus driver, then Launch again.")
+            })?;
+            let mut pad = Xbox360Wired::new(client, TargetId::default());
+            pad.plugin()
+                .and_then(|_| pad.wait_ready())
+                .map_err(|e| format!("Virtual controller failed to start: {e}"))?;
+            shared.log("Virtual Xbox 360 controller plugged in.");
+            Ok(Pad::Xbox(pad))
+        }
+    }
+}
+
 /// Run the server until `stop` is set. Reports progress/errors via `shared`.
 /// Returns when the input loop ends (stop requested or a fatal error).
-pub fn run(shared: Arc<Shared>, stop: Arc<AtomicBool>, game: Game) {
+pub fn run(shared: Arc<Shared>, stop: Arc<AtomicBool>, game: Game, device: DeviceMode) {
     shared.set_status(|s| {
         *s = Status::default();
     });
     shared.log("Starting CorsaConnect server...");
 
-    // Virtual Xbox 360 pad via ViGEmBus.
-    let client = match Client::connect() {
-        Ok(c) => c,
-        Err(e) => {
-            let msg = format!(
-                "Could not connect to ViGEmBus ({e}). Install the ViGEmBus driver, then Launch again."
-            );
+    let mut pad = match open_device(&shared, device) {
+        Ok(p) => p,
+        Err(msg) => {
             shared.log(&msg);
             shared.set_status(|s| s.error = Some(msg));
             return;
         }
     };
-    let mut pad = Xbox360Wired::new(client, TargetId::default());
-    if let Err(e) = pad.plugin().and_then(|_| pad.wait_ready()) {
-        let msg = format!("Virtual controller failed to start: {e}");
-        shared.log(&msg);
-        shared.set_status(|s| s.error = Some(msg));
-        return;
-    }
-    shared.set_status(|s| s.vigem_ok = true);
-    shared.log("Virtual Xbox 360 controller plugged in.");
+    shared.set_status(|s| s.device_ok = true);
 
     // Where to send telemetry, learned from the phone's first input packet.
     let phone_addr: Arc<Mutex<Option<SocketAddr>>> = Arc::new(Mutex::new(None));
@@ -248,8 +386,9 @@ pub fn run(shared: Arc<Shared>, stop: Arc<AtomicBool>, game: Game) {
         let _ = h.join();
     }
     // Dropping `pad` here unplugs the virtual controller.
+    drop(pad);
     shared.set_status(|s| {
-        s.vigem_ok = false;
+        s.device_ok = false;
         s.phone = None;
         s.beamng = false;
         s.motion = false;
@@ -260,7 +399,7 @@ pub fn run(shared: Arc<Shared>, stop: Arc<AtomicBool>, game: Game) {
 fn input_loop(
     shared: &Arc<Shared>,
     stop: &Arc<AtomicBool>,
-    pad: &mut Xbox360Wired<Client>,
+    pad: &mut Pad,
     phone_addr: &Arc<Mutex<Option<SocketAddr>>>,
 ) -> std::io::Result<()> {
     let sock = UdpSocket::bind(("0.0.0.0", INPUT_PORT))?;
@@ -272,7 +411,7 @@ fn input_loop(
         match sock.recv_from(&mut buf) {
             Ok((n, src)) => {
                 if let Some(input) = InputPacket::parse(&buf[..n]) {
-                    let _ = pad.update(&to_gamepad(&input));
+                    pad.update(&input);
                     let mut slot = phone_addr.lock().unwrap();
                     if slot.map(|a| a.ip()) != Some(src.ip()) {
                         *slot = Some(SocketAddr::new(src.ip(), PHONE_TELEMETRY_PORT));
@@ -286,7 +425,7 @@ fn input_loop(
                     || e.kind() == std::io::ErrorKind::TimedOut =>
             {
                 // No input: recenter so the car doesn't run away.
-                let _ = pad.update(&XGamepad::default());
+                pad.center();
             }
             Err(e) => return Err(e),
         }
@@ -298,9 +437,12 @@ fn to_gamepad(input: &InputPacket) -> XGamepad {
     let clutch_axis = (input.clutch as i32 * i16::MAX as i32 / 255) as i16;
     XGamepad {
         buttons: XButtons { raw: input.buttons },
+        // The free stick takes the two thumbstick axes nothing else uses: the
+        // left stick's Y and the right stick's X. Not as tidy as vJoy's spare
+        // axes, but an Xbox pad has nothing else left.
         thumb_lx: input.steer,
-        thumb_ly: 0,
-        thumb_rx: 0,
+        thumb_ly: input.joy_y,
+        thumb_rx: input.joy_x,
         thumb_ry: clutch_axis,
         left_trigger: input.brake,
         right_trigger: input.throttle,
@@ -331,6 +473,10 @@ fn telemetry_relay(
         }
     };
     shared.log(format!("Listening for BeamNG OutGauge on UDP :{OUTGAUGE_PORT}"));
+
+    if let Some(a) = shared.mirror() {
+        shared.log(format!("Mirroring telemetry to {a}"));
+    }
 
     let mut buf = [0u8; 128];
     let mut announced = false;
@@ -414,9 +560,13 @@ fn telemetry_relay(
             tel.max_rpm = 9000.0f32.max(peak_rpm * 1.05);
             tel.redline = tel.max_rpm;
         }
+        let packet = tel.encode();
         if let Some(addr) = *phone_addr.lock().unwrap() {
-            let _ = tx.send_to(&tel.encode(), addr);
+            let _ = tx.send_to(&packet, addr);
         }
+        // Sent whether or not a phone is connected: the mirror is a separate
+        // consumer and shouldn't depend on the phone being up.
+        shared.send_mirror(&tx, &packet);
     }
 }
 
@@ -465,9 +615,11 @@ fn truck_telemetry(
         tel.redline = 2600.0;
 
         shared.set_status(|s| s.last = Some((tel.speed_kmh, tel.rpm, tel.gear)));
+        let packet = tel.encode();
         if let Some(addr) = *phone_addr.lock().unwrap() {
-            let _ = tx.send_to(&tel.encode(), addr);
+            let _ = tx.send_to(&packet, addr);
         }
+        shared.send_mirror(&tx, &packet);
         std::thread::sleep(Duration::from_millis(16));
     }
 }
@@ -514,5 +666,58 @@ fn motion_listener(shared: Arc<Shared>, stop: Arc<AtomicBool>) {
         }
         let slip = slip_est.update(&m);
         shared.update_motion(slip, motionsim::impact_fraction(&m));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The mirror is off unless someone asks for it, follows [Shared::set_mirror]
+    /// without a restart, and counts only what actually went out - that counter
+    /// is what the launcher shows to prove the link is alive.
+    #[test]
+    fn mirror_follows_the_setting() {
+        let shared = Shared::new();
+        // A listener standing in for PicoPanel's "Corsa" source.
+        let pico = UdpSocket::bind(("127.0.0.1", 0)).unwrap();
+        pico.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
+        let tx = UdpSocket::bind(("127.0.0.1", 0)).unwrap();
+        let packet = TelemetryPacket {
+            speed_kmh: 88.0,
+            rpm: 4200.0,
+            gear: 3,
+            ..Default::default()
+        }
+        .encode();
+
+        // Off (whatever the environment said, this test owns the setting).
+        shared.set_mirror(None);
+        shared.send_mirror(&tx, &packet);
+        assert_eq!(shared.mirror_sent(), 0);
+
+        // On, mid-run.
+        shared.set_mirror(Some(pico.local_addr().unwrap()));
+        shared.send_mirror(&tx, &packet);
+        let mut buf = [0u8; 128];
+        let (n, _) = pico.recv_from(&mut buf).expect("nothing arrived at the mirror");
+        assert_eq!(&buf[..n], &packet[..]);
+        assert_eq!(shared.mirror_sent(), 1);
+
+        // And off again, still mid-run.
+        shared.set_mirror(None);
+        shared.send_mirror(&tx, &packet);
+        assert_eq!(shared.mirror_sent(), 1);
+        assert!(pico.recv_from(&mut buf).is_err());
+    }
+
+    /// What the mirror carries has to be what PicoPanel's decoder expects:
+    /// `<2sBb11fHI16s16s`, 86 bytes, version 7.
+    #[test]
+    fn packet_matches_the_shape_picopanel_unpacks() {
+        let packet = TelemetryPacket::default().encode();
+        assert_eq!(packet.len(), 86);
+        assert_eq!(&packet[..2], b"CT");
+        assert_eq!(packet[2], crate::protocol::PROTO_VERSION);
     }
 }

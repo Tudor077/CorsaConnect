@@ -14,11 +14,12 @@ import java.nio.ByteOrder
  * v4: telemetry adds `slip` and `impact` (slide + crash) from BeamNG MotionSim.
  * v5: telemetry adds learned `maxRpm` and `redline` so the tach auto-fits the car.
  * v6: telemetry adds the rest of OutGauge: `flags`, `showLights`, two text displays.
+ * v7: input adds `joyX`/`joyY`, the free stick widget's two axes (spare vJoy axes).
  */
 object Protocol {
     const val INPUT_PORT = 5000
     const val TELEMETRY_PORT = 5001
-    const val VERSION: Byte = 6
+    const val VERSION: Byte = 7
 
     /** Live controller state the phone streams to the server. */
     data class Input(
@@ -27,11 +28,13 @@ object Protocol {
         val brake: Int = 0,     // 0..255, left trigger
         val clutch: Int = 0,    // 0..255, right-stick Y axis
         val buttons: Int = 0,   // raw 16-bit XInput mask, see [XInput]
+        val joyX: Short = 0,    // free stick, centered at 0, right is positive
+        val joyY: Short = 0,    // free stick, centered at 0, up is positive
     )
 
-    /** Encode an [Input] into the 10-byte packet the server expects. */
+    /** Encode an [Input] into the 14-byte packet the server expects. */
     fun encodeInput(input: Input): ByteArray {
-        val buf = ByteBuffer.allocate(10).order(ByteOrder.LITTLE_ENDIAN)
+        val buf = ByteBuffer.allocate(14).order(ByteOrder.LITTLE_ENDIAN)
         buf.put('C'.code.toByte())
         buf.put('C'.code.toByte())
         buf.put(VERSION)
@@ -40,6 +43,8 @@ object Protocol {
         buf.put(input.throttle.coerceIn(0, 255).toByte())
         buf.put(input.brake.coerceIn(0, 255).toByte())
         buf.put(input.clutch.coerceIn(0, 255).toByte())
+        buf.putShort(input.joyX)
+        buf.putShort(input.joyY)
         return buf.array()
     }
 

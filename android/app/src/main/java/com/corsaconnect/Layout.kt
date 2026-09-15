@@ -14,6 +14,7 @@ enum class ControlType {
     THROTTLE_SLIDER, // vertical analog pedal -> throttle (right trigger)
     BRAKE_SLIDER,    // vertical analog pedal -> brake (left trigger)
     CLUTCH_SLIDER,   // vertical analog pedal -> clutch (right-stick Y)
+    JOYSTICK,        // two-axis thumbstick -> the free stick axes (vJoy RX/RY)
     BUTTON,          // hold/toggle -> an XInput button (configurable)
     SPEEDOMETER,     // analog speed gauge (telemetry)
     TACHOMETER,      // analog rpm gauge (telemetry)
@@ -49,7 +50,7 @@ data class Element(
     val label: String = "",
     val button: Int = 0,       // XInput mask, for BUTTON
     val button2: Int = 0,      // optional second XInput mask, pressed together (combo)
-    val momentary: Boolean = true, // BUTTON: hold vs toggle
+    val momentary: Boolean = true, // BUTTON: hold vs toggle. JOYSTICK: spring back to centre vs stay put
     val shift: Boolean = false, // BUTTON: a gear-shift, so grind feedback applies
 ) {
     fun toJson(): JSONObject = JSONObject().apply {
@@ -100,12 +101,15 @@ data class Element(
                 ControlType.FUEL, ControlType.ENGINE_TEMP -> 0.12f to 0.16f
                 ControlType.DASH_LIGHTS -> 0.3f to 0.1f
                 ControlType.THROTTLE_SLIDER, ControlType.BRAKE_SLIDER, ControlType.CLUTCH_SLIDER -> 0.12f to 0.6f
+                // Roughly square on a typical 20:9 phone held sideways.
+                ControlType.JOYSTICK -> 0.22f to 0.5f
                 else -> 0.16f to 0.3f
             }
             val label = when (type) {
                 ControlType.GAS, ControlType.THROTTLE_SLIDER -> "GAS"
                 ControlType.BRAKE, ControlType.BRAKE_SLIDER -> "BRAKE"
                 ControlType.CLUTCH_SLIDER -> "CLUTCH"
+                ControlType.JOYSTICK -> "LOOK"
                 ControlType.BUTTON -> "A"
                 else -> ""
             }
@@ -259,17 +263,47 @@ data class Config(
     }
 }
 
-/** Persists [Config] as a JSON blob in SharedPreferences. */
+/**
+ * Persists [Config] as a JSON blob in SharedPreferences.
+ *
+ * There used to be exactly one copy: anything that made [Config.fromJson] throw
+ * fell back to [Config.default], and the next save - a drag, a rebind, anything
+ * - wrote that default over the only copy, taking every saved preset with it.
+ * So there are three keys now: the live blob, the one before it, and a parking
+ * spot for a blob we couldn't read. Nothing is ever overwritten by a fallback.
+ */
 class ConfigStore(context: Context) {
     private val prefs = context.getSharedPreferences("corsaconnect", Context.MODE_PRIVATE)
 
-    fun load(): Config = try {
-        prefs.getString("config", null)?.let { Config.fromJson(JSONObject(it)) } ?: Config.default()
-    } catch (e: Exception) {
-        Config.default()
+    fun load(): Config {
+        val raw = prefs.getString(KEY, null) ?: return Config.default()
+        try {
+            return Config.fromJson(JSONObject(raw))
+        } catch (e: Exception) {
+            // Park the unreadable blob under its own key before anything else
+            // can write over it, then fall back to the last known good one.
+            prefs.edit().putString(KEY_BROKEN, raw).apply()
+        }
+        return prefs.getString(KEY_PREV, null)
+            ?.let { try { Config.fromJson(JSONObject(it)) } catch (e: Exception) { null } }
+            ?: Config.default()
     }
 
     fun save(config: Config) {
-        prefs.edit().putString("config", config.toJson().toString()).apply()
+        val json = config.toJson().toString()
+        val current = prefs.getString(KEY, null)
+        prefs.edit().apply {
+            if (current != null && current != json) putString(KEY_PREV, current)
+            putString(KEY, json)
+        }.apply()
+    }
+
+    /** The blob [load] couldn't parse, kept for recovery. Null if there is none. */
+    fun broken(): String? = prefs.getString(KEY_BROKEN, null)
+
+    private companion object {
+        const val KEY = "config"
+        const val KEY_PREV = "config.prev"
+        const val KEY_BROKEN = "config.broken"
     }
 }

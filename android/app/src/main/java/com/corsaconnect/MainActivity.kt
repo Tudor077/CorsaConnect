@@ -5,7 +5,9 @@ import android.view.WindowManager
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
@@ -39,7 +41,9 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.rotate
 import kotlinx.coroutines.delay
+import org.json.JSONObject
 import kotlin.math.atan2
+import kotlin.math.hypot
 import kotlin.math.min
 import kotlin.math.roundToInt
 
@@ -57,6 +61,9 @@ class MainActivity : ComponentActivity() {
     @Volatile private var brake = 0
     @Volatile private var clutch = 0
     @Volatile private var buttonsState = 0
+    // Free stick widget, -1..1 each, centre is 0. Up is positive on Y.
+    @Volatile private var joyX = 0f
+    @Volatile private var joyY = 0f
     // On-screen wheel: -1..1 written by the wheel widget, read when useWheel is on.
     @Volatile private var wheelSteer = 0f
     @Volatile private var useWheel = false
@@ -127,11 +134,10 @@ class MainActivity : ComponentActivity() {
     private fun applyTuning(c: Config) {
         steering.sensitivity = c.sensitivity
         steering.deadZone = c.deadZone
-        steering.maxAngleRad = Math.toRadians(c.maxAngleDeg.toDouble()).toFloat()
-        // Gyro + accel fusion is the one sensor mode (gravity-only wraps at
-        // 180° and can't do real wheel ranges); gravity remains only as the
-        // fallback for devices without a gyroscope.
-        steering.useGyro = steering.hasGyro
+        // Past 180° the wheel angle comes from the gyro's turn count, so a
+        // device without one can't reach a lock angle bigger than that.
+        val lockDeg = if (steering.hasGyro) c.maxAngleDeg else c.maxAngleDeg.coerceAtMost(180f)
+        steering.maxAngleRad = Math.toRadians(lockDeg.toDouble()).toFloat()
         useWheel = c.touchWheel
         haptics.settings = c.hapticSettings()
     }
@@ -149,6 +155,8 @@ class MainActivity : ComponentActivity() {
                     brake = brake,
                     clutch = clutch,
                     buttons = buttonsState,
+                    joyX = axisShort(joyX),
+                    joyY = axisShort(joyY),
                 )
             },
             onTelemetry = { latestTelemetry = it },
@@ -237,6 +245,40 @@ class MainActivity : ComponentActivity() {
             elements.clear(); elements.addAll(els)
             config = config.copy(elements = elements.toList()); store.save(config)
         }
+        fun toast(msg: String) =
+            Toast.makeText(this@MainActivity, msg, Toast.LENGTH_SHORT).show()
+
+        // Layout + presets + tuning to a file the user picks, and back again.
+        // A copy off the phone is the only thing that survives a wiped app.
+        val exportFile = rememberLauncherForActivityResult(
+            ActivityResultContracts.CreateDocument("application/json")
+        ) { uri ->
+            if (uri == null) return@rememberLauncherForActivityResult
+            runCatching {
+                contentResolver.openOutputStream(uri)?.use {
+                    it.write(config.toJson().toString(2).toByteArray())
+                } ?: error("could not open the file for writing")
+            }
+                .onSuccess { toast("Layout exported (${config.presets.size} presets)") }
+                .onFailure { toast("Export failed: ${it.message}") }
+        }
+        val importFile = rememberLauncherForActivityResult(
+            ActivityResultContracts.OpenDocument()
+        ) { uri ->
+            if (uri == null) return@rememberLauncherForActivityResult
+            runCatching {
+                val text = contentResolver.openInputStream(uri)
+                    ?.use { it.readBytes().decodeToString() }
+                    ?: error("could not open the file")
+                Config.fromJson(JSONObject(text))
+            }.onSuccess { imported ->
+                config = imported
+                elements.clear(); elements.addAll(imported.elements)
+                store.save(config)
+                toast("Imported ${imported.elements.size} controls, ${imported.presets.size} presets")
+            }.onFailure { toast("Import failed: ${it.message}") }
+        }
+
         // Apply a preset by name and remember it as the active one.
         fun applyPreset(name: String) {
             when (name) {
@@ -460,6 +502,13 @@ class MainActivity : ComponentActivity() {
                     )
                     store.save(config)
                 },
+                onExport = { exportFile.launch("corsaconnect-layout.json") },
+                onImport = {
+                    // Some file managers hand .json out as octet-stream, so
+                    // don't filter it down to the one polite mime type.
+                    importFile.launch(arrayOf("application/json", "text/*", "application/octet-stream"))
+                },
+                brokenKept = store.broken() != null,
                 onClose = { showPresets = false },
             )
         }
@@ -525,6 +574,15 @@ class MainActivity : ComponentActivity() {
             ControlType.CLUTCH_SLIDER -> VerticalAxis(el.label, Color(0xFF6A4AA8), enabled = !editMode, lcd = lcd) {
                 clutch = it
             }
+            ControlType.JOYSTICK -> Thumbstick(
+                label = el.label,
+                springBack = el.momentary,
+                enabled = !editMode,
+                lcd = lcd,
+            ) { x, y ->
+                joyX = x
+                joyY = y
+            }
             ControlType.BUTTON -> XButton(el, enabled = !editMode, lcd = lcd)
         }
     }
@@ -561,6 +619,10 @@ private fun gearLabel(gear: Int) = when {
     gear == 1 -> "N"
     else -> (gear - 1).toString()
 }
+
+/** A -1..1 widget value as the full-range i16 the wire format carries. */
+private fun axisShort(v: Float): Short =
+    (v.coerceIn(-1f, 1f) * Short.MAX_VALUE).roundToInt().toShort()
 
 private fun fmtSpeed(kmh: Float, imperial: Boolean) =
     (if (imperial) kmh * 0.621371f else kmh).roundToInt().toString()
@@ -806,6 +868,97 @@ private fun VerticalAxis(
     }
 }
 
+/**
+ * A two-axis thumbstick driving the free stick axes. Drag anywhere inside to
+ * move the knob; it reports -1..1 per axis with up positive. Unless it's pinned
+ * ([springBack] off, for a stick used as a set-and-leave control) it snaps back
+ * to centre when you lift off.
+ */
+@Composable
+private fun Thumbstick(
+    label: String,
+    springBack: Boolean,
+    enabled: Boolean,
+    lcd: Boolean = false,
+    onValue: (Float, Float) -> Unit,
+) {
+    // Knob offset in -1..1 per axis, screen-style (y grows downwards).
+    var knob by remember { mutableStateOf(Offset.Zero) }
+    val haptic = LocalHapticFeedback.current
+
+    Box(
+        Modifier
+            .fillMaxSize()
+            .clip(RoundedCornerShape(if (lcd) 0.dp else 14.dp))
+            .background(if (lcd) LCD_BG else Color(0xFF1C1C24))
+            .then(
+                if (enabled) Modifier.pointerInput(springBack) {
+                    awaitEachGesture {
+                        // Travel radius, leaving room for the knob at full lock.
+                        val radius = min(size.width, size.height) / 2f * 0.72f
+                        val centre = Offset(size.width / 2f, size.height / 2f)
+                        fun apply(p: Offset) {
+                            var d = p - centre
+                            val len = hypot(d.x, d.y)
+                            if (len > radius) d *= radius / len
+                            knob = d / radius
+                            onValue(knob.x, -knob.y)
+                        }
+                        val down = awaitFirstDown()
+                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                        apply(down.position)
+                        while (true) {
+                            val change = awaitPointerEvent().changes.first()
+                            if (!change.pressed) break
+                            apply(change.position)
+                        }
+                        if (springBack) {
+                            knob = Offset.Zero
+                            onValue(0f, 0f)
+                        }
+                    }
+                } else Modifier
+            ),
+    ) {
+        Canvas(Modifier.fillMaxSize()) {
+            val radius = min(size.width, size.height) / 2f * 0.72f
+            val centre = Offset(size.width / 2f, size.height / 2f)
+            drawCircle(
+                color = if (lcd) LCD_DARK else Color(0xFF3A3A46),
+                radius = radius,
+                center = centre,
+                style = Stroke(width = 2.dp.toPx()),
+            )
+            // Crosshair, so the centred position is readable at a glance.
+            val tick = radius * 0.12f
+            for (d in listOf(Offset(tick, 0f), Offset(0f, tick))) {
+                drawLine(
+                    color = if (lcd) LCD_DARK else Color(0xFF3A3A46),
+                    start = centre - d,
+                    end = centre + d,
+                    strokeWidth = 2.dp.toPx(),
+                    cap = StrokeCap.Round,
+                )
+            }
+            drawCircle(
+                color = if (lcd) LCD_FILL else Color(0xFF4C8DFF),
+                radius = radius * 0.4f,
+                center = centre + knob * radius,
+            )
+        }
+        if (label.isNotBlank()) {
+            Text(
+                label,
+                color = if (lcd) LCD_DARK else Color.White,
+                fontWeight = if (lcd) FontWeight.Normal else FontWeight.Bold,
+                fontSize = 14.sp,
+                fontFamily = if (lcd) FontFamily.Monospace else null,
+                modifier = Modifier.align(Alignment.TopCenter).padding(top = 6.dp),
+            )
+        }
+    }
+}
+
 /** Landing screen: type the PC's IP and connect. */
 @Composable
 private fun StartScreen(ip: String, onIpChange: (String) -> Unit, onConnect: () -> Unit) {
@@ -893,6 +1046,9 @@ private fun PresetsDialog(
     onApply: (String) -> Unit,
     onSaveCurrent: (String) -> Unit,
     onDelete: (String) -> Unit,
+    onExport: () -> Unit,
+    onImport: () -> Unit,
+    brokenKept: Boolean,
     onClose: () -> Unit,
 ) {
     var newName by remember { mutableStateOf("") }
@@ -928,6 +1084,30 @@ private fun PresetsDialog(
                         onClick = { if (newName.isNotBlank()) { onSaveCurrent(newName.trim()); newName = "" } },
                         enabled = newName.isNotBlank(),
                     ) { Text("Save") }
+                }
+
+                HorizontalDivider(Modifier.padding(vertical = 2.dp))
+                Text("Backup", fontSize = 12.sp, color = Color(0xFF8A8A95))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(onClick = onExport, modifier = Modifier.weight(1f)) {
+                        Text("Export…", maxLines = 1)
+                    }
+                    OutlinedButton(onClick = onImport, modifier = Modifier.weight(1f)) {
+                        Text("Import…", maxLines = 1)
+                    }
+                }
+                Text(
+                    "Exports the whole layout, every preset and the tuning to one file.",
+                    fontSize = 11.sp,
+                    color = Color(0xFF8A8A95),
+                )
+                if (brokenKept) {
+                    Text(
+                        "A config that couldn't be read was kept aside (config.broken) instead " +
+                            "of being discarded.",
+                        fontSize = 11.sp,
+                        color = Color(0xFFE0A030),
+                    )
                 }
             }
         },
@@ -994,6 +1174,7 @@ private fun EditBar(
                     "Throttle slider" to ControlType.THROTTLE_SLIDER,
                     "Brake slider" to ControlType.BRAKE_SLIDER,
                     "Clutch slider" to ControlType.CLUTCH_SLIDER,
+                    "Joystick" to ControlType.JOYSTICK,
                     "Speedometer" to ControlType.SPEEDOMETER,
                     "Tachometer" to ControlType.TACHOMETER,
                     "Gear" to ControlType.GEAR_TEXT,
@@ -1110,6 +1291,27 @@ private fun ElementConfigSheet(
                         )
                     }
                 }
+                if (element.type == ControlType.JOYSTICK) {
+                    OutlinedTextField(
+                        value = element.label,
+                        onValueChange = { v -> onChange { it.copy(label = v) } },
+                        label = { Text("Label", fontSize = 11.sp) },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+
+                    SectionLabel("BEHAVIOUR")
+                    FilterChip(
+                        selected = !element.momentary,
+                        onClick = { onChange { it.copy(momentary = !it.momentary) } },
+                        label = { Text(if (element.momentary) "Spring back" else "Stays put") },
+                    )
+                    Text(
+                        "Two spare axes (vJoy RX/RY). Bind them in-game as a look/camera stick.",
+                        color = Color(0xFF9A9AA5),
+                        fontSize = 11.sp,
+                    )
+                }
             }
 
             HorizontalDivider(Modifier.padding(vertical = 8.dp), color = Color(0xFF2A2A33))
@@ -1159,8 +1361,8 @@ private fun SettingsDialog(
                     SliderRow("Sensitivity", c.sensitivity, 0.3f, 2.5f) { c = c.copy(sensitivity = it) }
                     SliderRow("Dead zone", c.deadZone, 0f, 0.2f) { c = c.copy(deadZone = it) }
                 }
-                // Steering is gyro+accel fusion (or the touch wheel), so the
-                // lock angle can exceed 180° - up to 540 each way = a 1080° wheel.
+                // The gyro's turn count carries the wheel past a half turn, so
+                // the lock angle can exceed 180° - up to 540 each way = 1080°.
                 SliderRow(
                     "Lock angle° (½ of full range)",
                     c.maxAngleDeg.coerceAtMost(540f), 30f, 540f, integer = true,

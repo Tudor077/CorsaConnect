@@ -1,8 +1,9 @@
 //! CorsaConnect launcher.
 //!
 //! A small window that shows the PC's LAN IP (to type on the phone) and a
-//! Launch button that starts the server: a virtual Xbox 360 pad fed by phone
-//! input over UDP, plus a BeamNG OutGauge -> phone telemetry relay.
+//! Launch button that starts the server: a virtual racing wheel (vJoy) or Xbox
+//! 360 pad fed by phone input over UDP, plus a BeamNG OutGauge -> phone
+//! telemetry relay.
 //!
 //! In release the console window is hidden so it looks like a normal app.
 
@@ -13,9 +14,12 @@ mod gui;
 mod headtracker;
 mod motionsim;
 mod outgauge;
+mod picopanel;
+mod prefs;
 mod protocol;
 mod scstelemetry;
 mod server;
+mod vjoy;
 
 fn main() -> eframe::Result<()> {
     gui::run()

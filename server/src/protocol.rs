@@ -1,6 +1,6 @@
 //! Wire formats for the two UDP links.
 //!
-//! Phone -> server : `InputPacket` (9 bytes). Sent ~60Hz, drives the virtual pad.
+//! Phone -> server : `InputPacket` (14 bytes). Sent ~60Hz, drives the virtual pad.
 //! Server -> phone : `TelemetryPacket` (compact, parsed from BeamNG OutGauge).
 //!
 //! Everything is little-endian. We keep the input packet tiny and fixed-size so
@@ -15,12 +15,14 @@
 //!     each car.
 //! v6: telemetry carries the remaining OutGauge fields - `flags`, `show_lights`
 //!     and the two text displays - so the phone can show them as widgets.
+//! v7: input carries `joy_x`/`joy_y`, a free two-axis stick the phone can put on
+//!     the HUD (camera look, or anything the game binds to a spare axis).
 
 /// Magic prefix for phone -> server input packets.
 pub const INPUT_MAGIC: &[u8; 2] = b"CC";
 /// Magic prefix for server -> phone telemetry packets.
 pub const TELEMETRY_MAGIC: &[u8; 2] = b"CT";
-pub const PROTO_VERSION: u8 = 6;
+pub const PROTO_VERSION: u8 = 7;
 
 /// Decoded controller input coming from the phone.
 #[derive(Debug, Clone, Copy)]
@@ -35,12 +37,15 @@ pub struct InputPacket {
     pub clutch: u8,
     /// Raw 16-bit XInput button mask, forwarded straight to the virtual pad.
     pub buttons: u16,
+    /// Free stick, full range, centered at 0. Right is +X, up is +Y.
+    pub joy_x: i16,
+    pub joy_y: i16,
 }
 
 impl InputPacket {
-    pub const LEN: usize = 10;
+    pub const LEN: usize = 14;
 
-    /// Parse a 10-byte input packet. Returns `None` if the buffer is too short
+    /// Parse a 14-byte input packet. Returns `None` if the buffer is too short
     /// or the magic / version don't match (i.e. it's some other UDP traffic).
     pub fn parse(buf: &[u8]) -> Option<Self> {
         if buf.len() < Self::LEN || &buf[0..2] != INPUT_MAGIC || buf[2] != PROTO_VERSION {
@@ -52,6 +57,8 @@ impl InputPacket {
             throttle: buf[7],
             brake: buf[8],
             clutch: buf[9],
+            joy_x: i16::from_le_bytes([buf[10], buf[11]]),
+            joy_y: i16::from_le_bytes([buf[12], buf[13]]),
         })
     }
 }

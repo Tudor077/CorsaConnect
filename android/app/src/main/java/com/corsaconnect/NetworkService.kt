@@ -7,11 +7,11 @@ import java.net.InetAddress
 
 /**
  * Owns the two UDP links to the PC server:
- *   * a sender thread streaming [Protocol.Input] at ~60Hz, and
+ *   * a sender thread streaming [Protocol.Input] at ~100Hz, and
  *   * a receiver thread listening for telemetry on [Protocol.TELEMETRY_PORT].
  *
  * Plain threads (no coroutines) keep the dependency surface small and the
- * 60Hz loop predictable.
+ * send loop predictable.
  */
 class NetworkService(
     private val serverIp: String,
@@ -46,7 +46,9 @@ class NetworkService(
             while (running) {
                 val bytes = Protocol.encodeInput(inputProvider())
                 socket.send(DatagramPacket(bytes, bytes.size, address, Protocol.INPUT_PORT))
-                Thread.sleep(16) // ~60Hz
+                // ~100Hz: the steering estimate updates at 200Hz, so sending at
+                // 60 was throwing away half of it for 10 bytes a packet.
+                Thread.sleep(10)
             }
         } catch (e: Exception) {
             if (running) Log.w("CorsaConnect", "sender stopped: ${e.message}")
