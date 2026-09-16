@@ -68,10 +68,31 @@ fun PixelElement(
                 wheelReset, enabled, cell, onSteer)
 
         else -> Canvas(Modifier.fillMaxSize()) {
-            pixels(cell) { readout(el, t, config, steer) }
+            val (needCols, needRows) = readoutNeed(el, t, config)
+            pixels(cellFor(cell, needCols, needRows)) { readout(el, t, config, steer) }
         }
     }
 }
+
+/**
+ * The smallest grid each readout can be drawn in, in pixels of that grid.
+ * Anything smaller and the label would not fit at text size 1, so the element
+ * takes a finer grid instead of spilling over its own frame.
+ */
+private fun readoutNeed(el: Element, t: Protocol.Telemetry, config: Config): Pair<Int, Int> =
+    when (el.type) {
+        ControlType.SPEEDOMETER, ControlType.SPEED_TEXT ->
+            colsFor(if (config.imperial) "MPH 000" else "KM/H 000") to 22
+        ControlType.TACHOMETER -> colsFor("RPM 00000") to 22
+        ControlType.TURBO -> colsFor("BAR 0.0") to 22
+        ControlType.FUEL -> colsFor("FUEL 000%") to 22
+        ControlType.ENGINE_TEMP -> colsFor("TEMP C 000") to 22
+        ControlType.GEAR_TEXT -> colsFor("R") to 12
+        // Six labels side by side is the widest thing on the HUD.
+        ControlType.DASH_LIGHTS -> 6 * (colsFor("BRAKE", 2)) / 5 + 5 to 11
+        ControlType.STEERING_BAR -> 24 to 11
+        else -> 16 to 16
+    }
 
 // ---------------------------------------------------------------- readouts --
 
@@ -121,7 +142,7 @@ private fun Pix.gauge(label: String, value: String, frac: Float, redFrac: Float)
     val barH = 6
     val valueTop = 10
     val room = rows - valueTop - barH - 3
-    val size = fit(value, cols - 4, 4).coerceAtMost(maxOf(1, room / 7))
+    val size = fitBox(value, cols - 4, room, 4)
     text(value, (cols - textWidth(value, size)) / 2, valueTop, size)
 
     val y = rows - barH - 2
@@ -137,8 +158,10 @@ private fun Pix.gauge(label: String, value: String, frac: Float, redFrac: Float)
 /** One number, as large as it will go. The gear and the bare speed use this. */
 private fun Pix.big(value: String, unit: String = "") {
     frame(0, 0, cols, rows)
-    val room = rows - if (unit.isEmpty()) 4 else 12
-    val size = fit(value, cols - 4, 6).coerceAtMost(maxOf(1, room / 7))
+    // Only the frame and a pixel of air: a gear that reads 'N' in a box this
+    // size should fill it, not sit in the middle of it at text size 1.
+    val room = rows - if (unit.isEmpty()) 2 else 10
+    val size = fitBox(value, cols - 2, room, 6)
     val h = textHeight(size)
     val top = if (unit.isEmpty()) (rows - h) / 2 else (rows - h - 8) / 2
     text(value, (cols - textWidth(value, size)) / 2, top, size)
@@ -205,7 +228,8 @@ private fun PixelPedal(label: String, enabled: Boolean, cell: Float, onValue: (I
             } else Modifier,
         ),
     ) {
-        pixels(cell) {
+        // A pedal is narrow by nature, so its label is what decides the grid.
+        pixels(cellFor(cell, colsFor(label, 2), 20)) {
             frame(0, 0, cols, rows)
             val inner = rows - 2
             val fill = (frac * inner).roundToInt()
@@ -242,8 +266,8 @@ private fun PixelHold(
             } else Modifier,
         ),
     ) {
-        pixels(cell) {
-            val size = fit(label, cols - 4, 3)
+        pixels(cellFor(cell, colsFor(label), 11)) {
+            val size = fitBox(label, cols - 4, rows - 4, 3)
             tag(label, 0, 0, cols, rows, size, down)
         }
     }
@@ -276,8 +300,8 @@ private fun PixelButton(
             } else Modifier,
         ),
     ) {
-        pixels(cell) {
-            val size = fit(label, cols - 4, 3)
+        pixels(cellFor(cell, colsFor(label), 11)) {
+            val size = fitBox(label, cols - 4, rows - 4, 3)
             tag(label, 0, 0, cols, rows, size, down || toggled)
         }
     }
@@ -320,7 +344,7 @@ private fun PixelStick(
             } else Modifier,
         ),
     ) {
-        pixels(cell) {
+        pixels(cellFor(cell, 16, 16)) {
             val cx = cols / 2
             val cy = rows / 2
             val r = (min(cols, rows) / 2f * 0.72f).toInt()
@@ -365,7 +389,7 @@ private fun PixelWheel(
             } else Modifier,
         ),
     ) {
-        pixels(cell) {
+        pixels(cellFor(cell, 20, 20)) {
             val cx = cols / 2
             val cy = rows / 2
             val r = min(cols, rows) / 2 - 1
