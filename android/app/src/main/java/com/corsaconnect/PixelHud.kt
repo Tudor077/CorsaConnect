@@ -238,13 +238,10 @@ private fun PixelPedal(label: String, enabled: Boolean, cell: Float, onValue: (I
             val inner = rows - 2
             val fill = (frac * inner).roundToInt()
             if (fill > 0) {
-                // One dither over the whole fill, not a stack of one-pixel
-                // strips: the threshold matrix is 4x4, so a strip only ever
-                // uses one row of it and comes out as vertical tearing.
-                dither(1, rows - 1 - fill, cols - 2, fill, 8)
-                // A solid edge at the top, so where the pedal actually is
-                // reads instantly instead of having to be judged from texture.
-                rect(1, rows - 1 - fill, cols - 2, 1)
+                // The same 3..16 ramp the rev bar and the gauges use, turned on
+                // its end: thin at the bottom where the travel starts, solid at
+                // the level the pedal has reached.
+                ditherRampUp(1, rows - 1 - fill, cols - 2, fill, 3, 16)
             }
             textCut(label, (cols - textWidth(label, 1)) / 2, 2, 1)
             val pct = "${(frac * 100).roundToInt()}%"

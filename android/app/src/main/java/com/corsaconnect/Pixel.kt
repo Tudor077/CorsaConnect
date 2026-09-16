@@ -318,6 +318,27 @@ class Pix(private val ds: DrawScope, val cell: Float, val cols: Int, val rows: I
         text(s, x, y, size)
     }
 
+    /**
+     * The same ramp stood on end, for a bar that fills upwards.
+     *
+     * Density is thin where the bar starts and solid at the value it has
+     * reached, exactly as the horizontal ones read, so a pedal and the rev bar
+     * say the same thing in the same language. The top row being solid is also
+     * what marks the level - no separate edge line needed.
+     */
+    fun ditherRampUp(
+        x: Int, y: Int, w: Int, h: Int, from: Int, to: Int, color: Color = PIXEL_LIT,
+    ) {
+        if (h <= 0) return
+        for (j in 0 until h) {
+            // j counts downwards, so row 0 is the top: the dense end.
+            val lv = to + (from - to) * j / (if (h > 1) h - 1 else 1)
+            for (i in 0 until w) {
+                if (BAYER4[((j and 3) shl 2) or (i and 3)] < lv) dot(x + i, y + j, color)
+            }
+        }
+    }
+
     /** Text, GFX style: (x, y) is the top-left of the glyph box, 6*size wide. */
     fun text(s: String, x: Int, y: Int, size: Int = 1, color: Color = PIXEL_LIT) {
         var cx = x
