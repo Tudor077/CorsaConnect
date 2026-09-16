@@ -583,6 +583,7 @@ class MainActivity : ComponentActivity() {
                 joyX = x
                 joyY = y
             }
+            ControlType.PANEL_SCREEN -> PanelScreen(t, enabled = !editMode)
             ControlType.BUTTON -> XButton(el, enabled = !editMode, lcd = lcd)
         }
     }
@@ -1175,6 +1176,7 @@ private fun EditBar(
                     "Brake slider" to ControlType.BRAKE_SLIDER,
                     "Clutch slider" to ControlType.CLUTCH_SLIDER,
                     "Joystick" to ControlType.JOYSTICK,
+                    "Panel screen" to ControlType.PANEL_SCREEN,
                     "Speedometer" to ControlType.SPEEDOMETER,
                     "Tachometer" to ControlType.TACHOMETER,
                     "Gear" to ControlType.GEAR_TEXT,

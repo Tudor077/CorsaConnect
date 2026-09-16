@@ -15,6 +15,7 @@ enum class ControlType {
     BRAKE_SLIDER,    // vertical analog pedal -> brake (left trigger)
     CLUTCH_SLIDER,   // vertical analog pedal -> clutch (right-stick Y)
     JOYSTICK,        // two-axis thumbstick -> the free stick axes (vJoy RX/RY)
+    PANEL_SCREEN,    // the PicoPanel dashboard, redrawn at the phone's resolution
     BUTTON,          // hold/toggle -> an XInput button (configurable)
     SPEEDOMETER,     // analog speed gauge (telemetry)
     TACHOMETER,      // analog rpm gauge (telemetry)
@@ -103,6 +104,8 @@ data class Element(
                 ControlType.THROTTLE_SLIDER, ControlType.BRAKE_SLIDER, ControlType.CLUTCH_SLIDER -> 0.12f to 0.6f
                 // Roughly square on a typical 20:9 phone held sideways.
                 ControlType.JOYSTICK -> 0.22f to 0.5f
+                // The panel's own proportions, minus the header.
+                ControlType.PANEL_SCREEN -> 0.6f to 0.24f
                 else -> 0.16f to 0.3f
             }
             val label = when (type) {
