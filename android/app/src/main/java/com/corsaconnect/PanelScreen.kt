@@ -47,7 +47,10 @@ fun PanelScreen(t: Protocol.Telemetry, enabled: Boolean) {
                 } else Modifier,
             ),
     ) {
-        drawRect(PIXEL_BG)
+        // No background fill. An unlit pixel emits nothing, so it should show
+        // whatever is behind it - and painting the whole box black meant this
+        // element blanked out anything it overlapped on the HUD.
+        //
         // Whichever side runs out first decides, so dragging the element out of
         // proportion shrinks the picture instead of cutting the rev bar off.
         val cell = minOf(size.width / PW, size.height / PANEL_ROWS)
