@@ -22,12 +22,16 @@ import kotlin.math.sqrt
  * same word on the panel are the same shape.
  */
 
-/** Pure black, because an OLED pixel that is off emits nothing at all. */
+/**
+ * Two colours, because the display this imitates has two states.
+ *
+ * There is no dim grey here on purpose: a pixel is lit or it is not. Anything
+ * in between would be a shade the panel cannot produce, and the moment one
+ * appears the screen stops reading as one bit deep and starts reading as a
+ * drawing of one. Quieter elements are drawn thinner or hollow instead.
+ */
 val PIXEL_BG = Color(0xFF000000)
-/** A lit pixel, with the faint blue an OLED really has. */
-val PIXEL_LIT = Color(0xFFE6F2FF)
-/** Drawn but unlit: gauge ticks, the empty part of a bar, a button at rest. */
-val PIXEL_DIM = Color(0xFF1B2733)
+val PIXEL_LIT = Color(0xFFFFFFFF)
 
 /**
  * GFX's classic font, all 256 glyphs, one byte per column, bit 0 at the top.

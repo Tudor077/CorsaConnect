@@ -88,8 +88,9 @@ private fun readoutNeed(el: Element, t: Protocol.Telemetry, config: Config): Pai
         ControlType.FUEL -> colsFor("FUEL 000%") to 22
         ControlType.ENGINE_TEMP -> colsFor("TEMP C 000") to 22
         ControlType.GEAR_TEXT -> colsFor("R") to 12
-        // Six labels side by side is the widest thing on the HUD.
-        ControlType.DASH_LIGHTS -> 6 * (colsFor("BRAKE", 2)) / 5 + 5 to 11
+        // Six labels side by side, and they are the widest thing on the HUD:
+        // four characters plus a pixel either side, with a gap between each.
+        ControlType.DASH_LIGHTS -> 6 * (4 * 6 + 4) + 5 to 13
         ControlType.STEERING_BAR -> 24 to 11
         else -> 16 to 16
     }
@@ -138,7 +139,7 @@ private fun Pix.readout(el: Element, t: Protocol.Telemetry, config: Config, stee
 /** Label, value and a dithered bar: the shape every gauge takes in this skin. */
 private fun Pix.gauge(label: String, value: String, frac: Float, redFrac: Float) {
     frame(0, 0, cols, rows)
-    text(label, 2, 2, 1, PIXEL_DIM)
+    text(label, 2, 2, 1)
     val barH = 6
     val valueTop = 10
     val room = rows - valueTop - barH - 3
@@ -165,7 +166,7 @@ private fun Pix.big(value: String, unit: String = "") {
     val h = textHeight(size)
     val top = if (unit.isEmpty()) (rows - h) / 2 else (rows - h - 8) / 2
     text(value, (cols - textWidth(value, size)) / 2, top, size)
-    if (unit.isNotEmpty()) text(unit, (cols - textWidth(unit, 1)) / 2, top + h + 2, 1, PIXEL_DIM)
+    if (unit.isNotEmpty()) text(unit, (cols - textWidth(unit, 1)) / 2, top + h + 2, 1)
 }
 
 private fun Pix.dashLights(showLights: Int) {
@@ -173,10 +174,13 @@ private fun Pix.dashLights(showLights: Int) {
         "OIL" to 0x100, "BATT" to 0x200, "BEAM" to 0x2)
     val gap = 1
     val each = (cols - gap * (items.size - 1)) / items.size
-    val h = minOf(rows, 11)
+    val h = minOf(rows, 13)
     val top = (rows - h) / 2
+    // Every label takes the size the narrowest of them can manage, so the row
+    // reads as one instrument instead of six differently sized ones.
+    val size = items.minOf { (name, _) -> fitBox(name, each - 2, h - 2, 2) }
     items.forEachIndexed { i, (name, bit) ->
-        tag(name, i * (each + gap), top, each, h, 1, (showLights and bit) != 0)
+        tag(name, i * (each + gap), top, each, h, size, (showLights and bit) != 0)
     }
 }
 
@@ -184,7 +188,7 @@ private fun Pix.dashLights(showLights: Int) {
 private fun Pix.steeringBar(steer: Float) {
     val y = (rows - 7) / 2
     frame(0, y, cols, 7)
-    rect(cols / 2, y - 2, 1, 11, PIXEL_DIM)
+    rect(cols / 2, y - 2, 1, 11)
     val knob = maxOf(3, cols / 16)
     val span = cols - 2 - knob
     val x = 1 + ((steer.coerceIn(-1f, 1f) + 1f) / 2f * span).roundToInt()
@@ -348,12 +352,12 @@ private fun PixelStick(
             val cx = cols / 2
             val cy = rows / 2
             val r = (min(cols, rows) / 2f * 0.72f).toInt()
-            circle(cx, cy, r, PIXEL_DIM)
-            rect(cx - 1, cy, 3, 1, PIXEL_DIM)
-            rect(cx, cy - 1, 1, 3, PIXEL_DIM)
+            circle(cx, cy, r)
+            rect(cx - 1, cy, 3, 1)
+            rect(cx, cy - 1, 1, 3)
             val kr = maxOf(2, r * 4 / 10)
             fillCircle(cx + (knob.x * r).roundToInt(), cy + (knob.y * r).roundToInt(), kr)
-            if (label.isNotBlank()) text(label, (cols - textWidth(label, 1)) / 2, 1, 1, PIXEL_DIM)
+            if (label.isNotBlank()) text(label, (cols - textWidth(label, 1)) / 2, 1, 1)
         }
     }
 }
