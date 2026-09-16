@@ -58,6 +58,33 @@ fun PanelScreen(t: Protocol.Telemetry, enabled: Boolean) {
 /** Draw at the panel's own y, with the header band taken out. */
 private fun Pix.at(s: String, x: Int, y: Int, size: Int) = text(s, x, y - HEADER, size)
 
+/**
+ * Width of the ink, not of the cells. Every glyph carries a blank column of
+ * spacing after it, which is invisible in the middle of a word and a full pixel
+ * of stray air at the right-hand end - enough to see, at this scale, as the
+ * right margin being wider than the left.
+ */
+private fun Pix.inkWidth(s: String, size: Int) =
+    if (s.isEmpty()) 0 else textWidth(s, size) - size
+
+/** Right-aligned, so the margin on that side matches the one on the other. */
+private fun Pix.atRight(s: String, margin: Int, y: Int, size: Int) =
+    at(s, PW - margin - inkWidth(s, size), y, size)
+
+private fun Pix.atCentre(s: String, y: Int, size: Int) =
+    at(s, (PW - inkWidth(s, size)) / 2, y, size)
+
+/**
+ * The margins. The panel places things at fixed columns, which leaves the gear
+ * ending 18 pixels from the right edge while the speed starts 11 from the left,
+ * and on a bigger screen that lopsidedness is the first thing you see. Here
+ * each row is balanced about the centre instead: equal margins, so the pair
+ * reads as one composition rather than two things that happen to be on the same
+ * line. It is the one place this deliberately parts company with the panel.
+ */
+private const val M_WIDE = 11    // page 0: clear of the blinker arrows
+private const val M_TEXT = 2     // the two-column pages
+
 private fun Pix.carPage(page: Int, t: Protocol.Telemetry) {
     // Our gear is 0 = reverse, 1 = neutral, 2 = first. The panel counts from
     // neutral, with reverse below it.
@@ -70,31 +97,37 @@ private fun Pix.carPage(page: Int, t: Protocol.Telemetry) {
             blinkArrow(true, (t.showLights and 32) != 0)
             blinkArrow(false, (t.showLights and 64) != 0)
 
-            at(t.speedKmh.roundToInt().toString(), 11, 11, 2)
-            at("km/h", 11 + 36, 18, 1)
+            val speed = t.speedKmh.roundToInt().toString()
+            at(speed, M_WIDE, 11, 2)
+            // The unit follows the number instead of sitting at a fixed column,
+            // so it stays put when the speed drops from three digits to two.
+            at("km/h", M_WIDE + textWidth(speed, 2) + 2, 18, 1)
 
-            when {
-                gear < 0 -> at("R", 98, 11, 2)
-                gear == 0 -> at("N", 98, 11, 2)
-                gear < 10 -> at(gear.toString(), 98, 11, 2)
-                else -> at(gear.toString(), 98, 15, 1)
+            val label = when {
+                gear < 0 -> "R"
+                gear == 0 -> "N"
+                else -> gear.toString()
             }
+            if (label.length > 1) atRight(label, M_WIDE, 15, 1)
+            else atRight(label, M_WIDE, 11, 2)
+
             rpmBar(26, t.rpm.roundToInt(), rpmMax, redline)
         }
         1 -> {
             val fuel = (t.fuel * 100f).roundToInt()
             val temp = t.engineTemp.roundToInt()
             val turbo = (t.turbo * 10f).roundToInt()
-            at("FUEL " + if (t.fuel >= 0f) "$fuel%" else "?", 0, 11, 1)
-            at("TEMP " + if (temp != 0) "${temp}C" else "?", 68, 11, 1)
-            at("TURBO ${turbo / 10}.${abs(turbo % 10)}b", 0, 21, 1)
-            at("RPM ${t.rpm.roundToInt()}", 68, 21, 1)
+            at("FUEL " + if (t.fuel >= 0f) "$fuel%" else "?", M_TEXT, 11, 1)
+            atRight("TEMP " + if (temp != 0) "${temp}C" else "?", M_TEXT, 11, 1)
+            at("TURBO ${turbo / 10}.${abs(turbo % 10)}b", M_TEXT, 21, 1)
+            atRight("RPM ${t.rpm.roundToInt()}", M_TEXT, 21, 1)
         }
         else -> {
-            at("THR ${(t.throttle * 100f).roundToInt()}%", 0, 11, 1)
-            at("BRAKE ${(t.brake * 100f).roundToInt()}%", 56, 11, 1)
-            if (redline > 0) at("REDLINE $redline", 0, 21, 1)
-            else at("redline not learned", 0, 21, 1)
+            at("THR ${(t.throttle * 100f).roundToInt()}%", M_TEXT, 11, 1)
+            atRight("BRAKE ${(t.brake * 100f).roundToInt()}%", M_TEXT, 11, 1)
+            // One item on its own line, so it belongs in the middle.
+            if (redline > 0) atCentre("REDLINE $redline", 21, 1)
+            else atCentre("redline not learned", 21, 1)
         }
     }
 }
