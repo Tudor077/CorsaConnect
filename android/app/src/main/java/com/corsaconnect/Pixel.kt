@@ -305,6 +305,19 @@ class Pix(private val ds: DrawScope, val cell: Float, val cols: Int, val rows: I
         }
     }
 
+    /**
+     * Text with the pixels behind it cleared first.
+     *
+     * Over a dithered fill there is no colour that reads: white sits on white
+     * where the pattern is dense, black on black where it is sparse, and it
+     * changes as the fill moves. Punching a hole and writing into it is what a
+     * one-bit display can actually do, and it stays legible at any level.
+     */
+    fun textCut(s: String, x: Int, y: Int, size: Int = 1) {
+        rect(x - size, y - size, textWidth(s, size) + size, textHeight(size) + 2 * size, PIXEL_BG)
+        text(s, x, y, size)
+    }
+
     /** Text, GFX style: (x, y) is the top-left of the glyph box, 6*size wide. */
     fun text(s: String, x: Int, y: Int, size: Int = 1, color: Color = PIXEL_LIT) {
         var cx = x

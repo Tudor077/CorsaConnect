@@ -237,16 +237,18 @@ private fun PixelPedal(label: String, enabled: Boolean, cell: Float, onValue: (I
             frame(0, 0, cols, rows)
             val inner = rows - 2
             val fill = (frac * inner).roundToInt()
-            // Density rises towards the top, so how hard it is pressed reads at
-            // a glance even where the bar is narrow.
-            for (j in 0 until fill) {
-                val lv = 4 + 12 * (j + 1) / inner
-                dither(1, rows - 1 - j, cols - 2, 1, lv)
+            if (fill > 0) {
+                // One dither over the whole fill, not a stack of one-pixel
+                // strips: the threshold matrix is 4x4, so a strip only ever
+                // uses one row of it and comes out as vertical tearing.
+                dither(1, rows - 1 - fill, cols - 2, fill, 8)
+                // A solid edge at the top, so where the pedal actually is
+                // reads instantly instead of having to be judged from texture.
+                rect(1, rows - 1 - fill, cols - 2, 1)
             }
-            text(label, (cols - textWidth(label, 1)) / 2, 2, 1)
+            textCut(label, (cols - textWidth(label, 1)) / 2, 2, 1)
             val pct = "${(frac * 100).roundToInt()}%"
-            text(pct, (cols - textWidth(pct, 1)) / 2, rows / 2, 1,
-                if (fill > rows / 2) PIXEL_BG else PIXEL_LIT)
+            textCut(pct, (cols - textWidth(pct, 1)) / 2, rows / 2, 1)
         }
     }
 }
