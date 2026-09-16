@@ -30,7 +30,8 @@ enum class ControlType {
 /** Visual skin for the gauges/readouts. */
 enum class Design {
     MODERN,  // the dark, colourful default
-    VAPOR;   // monochrome green-grey LCD (Trail Tech Vapor look)
+    VAPOR,   // monochrome green-grey LCD (Trail Tech Vapor look)
+    PIXEL;   // the PicoPanel's own 1-bit look, whole pixels on black
 
     companion object {
         fun from(name: String?) = entries.firstOrNull { it.name == name } ?: MODERN

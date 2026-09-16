@@ -296,7 +296,10 @@ class MainActivity : ComponentActivity() {
                 onIpChange = { config = config.copy(serverIp = it); store.save(config) },
                 onConnect = { connect(config.serverIp); connected = true },
             )
-        } else Surface(Modifier.fillMaxSize(), color = Color(0xFF0E0E12)) {
+        } else Surface(
+            Modifier.fillMaxSize(),
+            color = if (config.design == Design.PIXEL) PIXEL_BG else Color(0xFF0E0E12),
+        ) {
             BoxWithConstraints(Modifier.fillMaxSize()) {
                 val pxW = constraints.maxWidth.toFloat()
                 val pxH = constraints.maxHeight.toFloat()
@@ -380,7 +383,12 @@ class MainActivity : ComponentActivity() {
                                 ),
                             contentAlignment = Alignment.Center,
                         ) {
-                            ElementContent(el, editMode, steerDisplay, config, wheelReset) { wheelSteer = it }
+                            ElementContent(
+                                el, editMode, steerDisplay, config, wheelReset,
+                                // One pixel size for the whole HUD, so every
+                                // element sits on the same grid.
+                                cell = pixelCell(pxH),
+                            ) { wheelSteer = it }
 
                             if (editMode) {
                                 // Resize handle, bottom-right.
@@ -530,10 +538,37 @@ class MainActivity : ComponentActivity() {
         steerDisplay: Float,
         config: Config,
         wheelReset: Int,
+        cell: Float,
         onWheelSteer: (Float) -> Unit,
     ) {
         val t = latestTelemetry
         val lcd = config.design == Design.VAPOR
+        // The pixel skin replaces every widget rather than restyling them, so
+        // it gets its own renderer and the rest of this function is untouched.
+        if (config.design == Design.PIXEL && el.type != ControlType.PANEL_SCREEN) {
+            PixelElement(
+                el = el,
+                t = t,
+                config = config,
+                steer = steerDisplay,
+                enabled = !editMode,
+                cell = cell,
+                wheelReset = wheelReset,
+                onSteer = onWheelSteer,
+                onPedal = { v ->
+                    when (el.type) {
+                        ControlType.BRAKE, ControlType.BRAKE_SLIDER -> brake = v
+                        ControlType.CLUTCH_SLIDER -> clutch = v
+                        else -> throttle = v
+                    }
+                },
+                onMask = { mask, on ->
+                    buttonsState = if (on) buttonsState or mask else buttonsState and mask.inv()
+                },
+                onJoy = { x, y -> joyX = x; joyY = y },
+            )
+            return
+        }
         when (el.type) {
             ControlType.SPEEDOMETER ->
                 Speedometer(t.speedKmh, config.maxSpeed, config.digitalGauges, config.imperial, lcd)
@@ -1126,6 +1161,7 @@ private fun DesignsDialog(active: Design, onPick: (Design) -> Unit, onClose: () 
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 PresetRow("Modern", active == Design.MODERN, onApply = { onPick(Design.MODERN) })
                 PresetRow("Vapor (LCD)", active == Design.VAPOR, onApply = { onPick(Design.VAPOR) })
+                PresetRow("Pixel (panel)", active == Design.PIXEL, onApply = { onPick(Design.PIXEL) })
             }
         },
     )
