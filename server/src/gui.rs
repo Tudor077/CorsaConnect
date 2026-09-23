@@ -275,7 +275,9 @@ impl eframe::App for App {
                 );
                 ui.add_space(4.0);
                 ui.label(
-                    RichText::new("Type this on your phone, then tap Connect.")
+                    RichText::new(
+                        "After Launch the phone finds this PC by itself; no firewall rule needed.",
+                    )
                         .size(12.0)
                         .color(MUTED),
                 );

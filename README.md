@@ -67,7 +67,21 @@ Run `dist/CorsaConnect.exe` (or `cd server && cargo run --release`). A small
 window shows your PC's LAN IP and a **Launch** button. Launch plugs in the
 virtual controller, listens for phone input on UDP 5000, and relays BeamNG
 telemetry to the phone. The status dots show the controller / phone / BeamNG,
-and the log panel shows what's happening. Type the IP shown into the phone app.
+and the log panel shows what's happening. The phone app finds the PC by
+itself; the IP shown is there in case you'd rather type it.
+
+### No firewall rule needed
+
+Windows Firewall blocks UDP that arrives out of the blue, but it lets in replies
+to traffic the PC sent first. So the PC speaks first: after Launch it
+broadcasts a tiny beacon (`"CD"` + version) from UDP 5000 to port 5001 on the
+LAN once a second. The phone hears it, fills in the PC's IP, and sends its
+input *from* 5001 *to* 5000, which the firewall treats as the answer to that
+beacon. From then on the telemetry and beacons the PC sends the phone keep the
+link open, whether or not a game is running. There's no need to click "Allow"
+on the prompt Windows may show, or to add a rule by hand. Only the Wi-Fi itself
+has to let the two devices see each other (guest networks and "AP isolation"
+don't).
 
 The single-file `.exe` starts with no console window. Rebuild the icon from
 `CorsaConnectLOGO.png` with `python tools/make_icons.py` (regenerates the
@@ -140,7 +154,8 @@ brake, LB/RB = shift down/up, A = handbrake.
 ## Android app
 
 Open `android/` in Android Studio, build and run on a real device (the emulator
-has no usable gravity sensor). Enter the PC's LAN IP, tap **Connect**, hold the
+has no usable gravity sensor). Launch the PC side first and the app fills in
+the PC's IP by itself (or type it), tap **Connect**, hold the
 phone like a wheel and tap **Center wheel** to calibrate.
 
 ### How the steering is measured
@@ -166,6 +181,8 @@ Little-endian throughout.
 
 - Input (phone -> server, 14 bytes, v7): `"CC"` + version + u16 buttons (raw XInput mask) + i16 steer + u8 throttle + u8 brake + u8 clutch + i16 joyX + i16 joyY, sent at ~100Hz
 - Telemetry (server -> phone, 32 bytes): `"CT"` + version + i8 gear + 7×f32
+- Beacon (server :5000 -> LAN broadcast and the phone, :5001, 1 Hz, 3 bytes): `"CD"` + version.
+  The phone sends input from the same socket (:5001) it receives on.
 
 ## Custom HUD
 

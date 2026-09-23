@@ -24,8 +24,11 @@ const OUTGAUGE_PORT: u16 = 4444;
 const MOTIONSIM_PORT: u16 = 4445;
 /// How long a crash spike keeps fading after it lands.
 const IMPACT_DECAY: Duration = Duration::from_millis(350);
-/// Port on the phone that listens for telemetry.
+/// Port on the phone that listens for telemetry (and for our beacon).
 const PHONE_TELEMETRY_PORT: u16 = 5001;
+/// How often the beacon goes out. Windows lets unicast replies to a broadcast
+/// in for 3 s, so this has to stay well under that.
+const BEACON_INTERVAL: Duration = Duration::from_millis(1000);
 
 /// Optional second destination for the telemetry we already parse and enrich.
 ///
@@ -169,6 +172,81 @@ fn decay_impact(impact: f32, at: Instant, now: Instant) -> f32 {
         0.0
     } else {
         impact * (1.0 - elapsed / span)
+    }
+}
+
+/// The one UDP socket the phone talks to, and where the phone is.
+///
+/// Everything to and from the phone goes through this socket on
+/// [INPUT_PORT] - input in, telemetry and beacons out - and that is what lets
+/// CorsaConnect work without a firewall rule. Windows Firewall blocks
+/// unsolicited inbound UDP, but it lets in replies to traffic the PC sent
+/// first: unicast replies to a broadcast for 3 s, and anything coming back on
+/// a flow we opened (our port 5000 <-> the phone's 5001). So the PC speaks
+/// first: [beacon_loop] broadcasts from :5000 to the LAN, the phone answers
+/// with input from :5001, and from then on our own telemetry and beacons to
+/// the phone keep that flow open.
+struct PhoneLink {
+    sock: UdpSocket,
+    addr: Mutex<Option<SocketAddr>>,
+}
+
+impl PhoneLink {
+    fn bind() -> std::io::Result<Self> {
+        let sock = UdpSocket::bind(("0.0.0.0", INPUT_PORT))?;
+        sock.set_read_timeout(Some(INPUT_TIMEOUT))?;
+        sock.set_broadcast(true)?;
+        Ok(PhoneLink { sock, addr: Mutex::new(None) })
+    }
+
+    fn phone(&self) -> Option<SocketAddr> {
+        *self.addr.lock().unwrap()
+    }
+
+    /// Send to the phone, if one has connected.
+    fn send(&self, packet: &[u8]) {
+        if let Some(a) = self.phone() {
+            let _ = self.sock.send_to(packet, a);
+        }
+    }
+}
+
+/// Where the beacon goes: the limited broadcast, plus the directed broadcast
+/// of our LAN (Windows sends 255.255.255.255 out of one adapter only, which is
+/// the wrong one when a VPN or Hyper-V switch is up). The subnet is assumed to
+/// be a /24, which is what nearly every home router hands out.
+fn beacon_targets() -> Vec<SocketAddr> {
+    let mut v = vec![SocketAddr::from((Ipv4Addr::BROADCAST, PHONE_TELEMETRY_PORT))];
+    if let Some(ip) = local_ipv4() {
+        let [a, b, c, _] = ip.octets();
+        v.push(SocketAddr::from((Ipv4Addr::new(a, b, c, 255), PHONE_TELEMETRY_PORT)));
+    }
+    v
+}
+
+/// Announce the PC on the LAN once a second, and poke the phone directly once
+/// it's connected. The broadcast is what opens the firewall for the phone's
+/// first packet (and lets the app fill in the PC's IP by itself); the unicast
+/// keeps the flow open while no game is sending telemetry.
+fn beacon_loop(link: Arc<PhoneLink>, stop: Arc<AtomicBool>) {
+    let packet = crate::protocol::beacon();
+    let mut targets = beacon_targets();
+    let mut ticks = 0u32;
+    while !stop.load(Ordering::Relaxed) {
+        // The LAN address can change under us (Wi-Fi switch, DHCP renew).
+        ticks += 1;
+        if ticks % 10 == 0 {
+            targets = beacon_targets();
+        }
+        for t in &targets {
+            let _ = link.sock.send_to(&packet, t);
+        }
+        link.send(&packet);
+        // Sleep in slices so Stop doesn't wait a whole interval.
+        let until = Instant::now() + BEACON_INTERVAL;
+        while Instant::now() < until && !stop.load(Ordering::Relaxed) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
 }
 
@@ -340,19 +418,36 @@ pub fn run(shared: Arc<Shared>, stop: Arc<AtomicBool>, game: Game, device: Devic
     };
     shared.set_status(|s| s.device_ok = true);
 
-    // Where to send telemetry, learned from the phone's first input packet.
-    let phone_addr: Arc<Mutex<Option<SocketAddr>>> = Arc::new(Mutex::new(None));
+    // The phone's socket; where to send telemetry is learned from its first
+    // input packet.
+    let link = match PhoneLink::bind() {
+        Ok(l) => Arc::new(l),
+        Err(e) => {
+            let msg = format!("Could not open UDP :{INPUT_PORT} for the phone: {e}");
+            shared.log(&msg);
+            shared.set_status(|s| s.error = Some(msg));
+            return;
+        }
+    };
+    shared.log(format!(
+        "Listening for phone input on UDP :{INPUT_PORT}, announcing the PC on the LAN (no firewall rule needed)."
+    ));
 
     // Telemetry (dashboard + force feedback) per game. The virtual controller
     // works everywhere; only the telemetry source differs.
     let mut telem: Vec<std::thread::JoinHandle<()>> = Vec::new();
+    telem.push({
+        let link = Arc::clone(&link);
+        let stop = Arc::clone(&stop);
+        std::thread::spawn(move || beacon_loop(link, stop))
+    });
     match game {
         Game::BeamNg => {
             telem.push({
                 let shared = Arc::clone(&shared);
                 let stop = Arc::clone(&stop);
-                let phone_addr = Arc::clone(&phone_addr);
-                std::thread::spawn(move || telemetry_relay(shared, stop, phone_addr))
+                let link = Arc::clone(&link);
+                std::thread::spawn(move || telemetry_relay(shared, stop, link))
             });
             telem.push({
                 let shared = Arc::clone(&shared);
@@ -364,8 +459,8 @@ pub fn run(shared: Arc<Shared>, stop: Arc<AtomicBool>, game: Game, device: Devic
             telem.push({
                 let shared = Arc::clone(&shared);
                 let stop = Arc::clone(&stop);
-                let phone_addr = Arc::clone(&phone_addr);
-                std::thread::spawn(move || truck_telemetry(shared, stop, phone_addr))
+                let link = Arc::clone(&link);
+                std::thread::spawn(move || truck_telemetry(shared, stop, link))
             });
         }
         Game::Wrc10 => {
@@ -376,7 +471,7 @@ pub fn run(shared: Arc<Shared>, stop: Arc<AtomicBool>, game: Game, device: Devic
         }
     }
 
-    if let Err(e) = input_loop(&shared, &stop, &mut pad, &phone_addr) {
+    if let Err(e) = input_loop(&shared, &stop, &mut pad, &link) {
         let msg = format!("Input listener stopped: {e}");
         shared.log(&msg);
         shared.set_status(|s| s.error = Some(msg));
@@ -400,26 +495,33 @@ fn input_loop(
     shared: &Arc<Shared>,
     stop: &Arc<AtomicBool>,
     pad: &mut Pad,
-    phone_addr: &Arc<Mutex<Option<SocketAddr>>>,
+    link: &Arc<PhoneLink>,
 ) -> std::io::Result<()> {
-    let sock = UdpSocket::bind(("0.0.0.0", INPUT_PORT))?;
-    sock.set_read_timeout(Some(INPUT_TIMEOUT))?;
-    shared.log(format!("Listening for phone input on UDP :{INPUT_PORT}"));
-
     let mut buf = [0u8; 64];
     while !stop.load(Ordering::Relaxed) {
-        match sock.recv_from(&mut buf) {
+        match link.sock.recv_from(&mut buf) {
             Ok((n, src)) => {
                 if let Some(input) = InputPacket::parse(&buf[..n]) {
                     pad.update(&input);
-                    let mut slot = phone_addr.lock().unwrap();
+                    let mut slot = link.addr.lock().unwrap();
                     if slot.map(|a| a.ip()) != Some(src.ip()) {
-                        *slot = Some(SocketAddr::new(src.ip(), PHONE_TELEMETRY_PORT));
+                        // Always the phone's :5001, not the packet's source port:
+                        // older apps send from a random port but listen on 5001.
+                        let addr = SocketAddr::new(src.ip(), PHONE_TELEMETRY_PORT);
+                        *slot = Some(addr);
+                        drop(slot);
+                        // Open the flow back to the phone right away rather than
+                        // on the next beacon.
+                        let _ = link.sock.send_to(&crate::protocol::beacon(), addr);
                         shared.log(format!("Phone connected from {}", src.ip()));
                         shared.set_status(|s| s.phone = Some(src.ip()));
                     }
                 }
             }
+            // Windows reports an ICMP "port unreachable" from an earlier send
+            // (a beacon to a phone whose app is closed) as an error on the next
+            // receive. It says nothing about this socket; keep listening.
+            Err(ref e) if e.kind() == std::io::ErrorKind::ConnectionReset => {}
             Err(ref e)
                 if e.kind() == std::io::ErrorKind::WouldBlock
                     || e.kind() == std::io::ErrorKind::TimedOut =>
@@ -449,11 +551,7 @@ fn to_gamepad(input: &InputPacket) -> XGamepad {
     }
 }
 
-fn telemetry_relay(
-    shared: Arc<Shared>,
-    stop: Arc<AtomicBool>,
-    phone_addr: Arc<Mutex<Option<SocketAddr>>>,
-) {
+fn telemetry_relay(shared: Arc<Shared>, stop: Arc<AtomicBool>, link: Arc<PhoneLink>) {
     let sock = match UdpSocket::bind(("0.0.0.0", OUTGAUGE_PORT)) {
         Ok(s) => s,
         Err(e) => {
@@ -561,9 +659,7 @@ fn telemetry_relay(
             tel.redline = tel.max_rpm;
         }
         let packet = tel.encode();
-        if let Some(addr) = *phone_addr.lock().unwrap() {
-            let _ = tx.send_to(&packet, addr);
-        }
+        link.send(&packet);
         // Sent whether or not a phone is connected: the mirror is a separate
         // consumer and shouldn't depend on the phone being up.
         shared.send_mirror(&tx, &packet);
@@ -572,11 +668,7 @@ fn telemetry_relay(
 
 /// Reads ETS2 / ATS telemetry from the scs-sdk-plugin shared memory and relays
 /// speed / rpm / gear to the phone.
-fn truck_telemetry(
-    shared: Arc<Shared>,
-    stop: Arc<AtomicBool>,
-    phone_addr: Arc<Mutex<Option<SocketAddr>>>,
-) {
+fn truck_telemetry(shared: Arc<Shared>, stop: Arc<AtomicBool>, link: Arc<PhoneLink>) {
     let tx = match UdpSocket::bind(("0.0.0.0", 0)) {
         Ok(s) => s,
         Err(e) => {
@@ -616,9 +708,7 @@ fn truck_telemetry(
 
         shared.set_status(|s| s.last = Some((tel.speed_kmh, tel.rpm, tel.gear)));
         let packet = tel.encode();
-        if let Some(addr) = *phone_addr.lock().unwrap() {
-            let _ = tx.send_to(&packet, addr);
-        }
+        link.send(&packet);
         shared.send_mirror(&tx, &packet);
         std::thread::sleep(Duration::from_millis(16));
     }

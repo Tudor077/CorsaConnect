@@ -15,11 +15,19 @@ import java.nio.ByteOrder
  * v5: telemetry adds learned `maxRpm` and `redline` so the tach auto-fits the car.
  * v6: telemetry adds the rest of OutGauge: `flags`, `showLights`, two text displays.
  * v7: input adds `joyX`/`joyY`, the free stick widget's two axes (spare vJoy axes).
+ *
+ * The PC also broadcasts a 3-byte beacon, `"CD"` + version, once a second. It
+ * tells the app where the PC is, and it's what lets the PC skip the firewall
+ * rule (see [NetworkService]).
  */
 object Protocol {
     const val INPUT_PORT = 5000
     const val TELEMETRY_PORT = 5001
     const val VERSION: Byte = 7
+
+    /** True if this is the PC's "I'm here" beacon (any version). */
+    fun isBeacon(data: ByteArray, len: Int): Boolean =
+        len >= 3 && data[0] == 'C'.code.toByte() && data[1] == 'D'.code.toByte()
 
     /** Live controller state the phone streams to the server. */
     data class Input(
