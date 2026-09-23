@@ -1,0 +1,79 @@
+name: Windows EXE
+
+# Builds the single-file CorsaConnect.exe on a real Windows runner (MSVC, so the
+# icon and version resource get embedded like a local build), attaches it to
+# the run, and publishes it as a pre-release with a direct download link.
+
+on:
+  push:
+    paths:
+      - 'server/**'
+      - 'npclient/**'
+      - '.github/workflows/windows.yml'
+  pull_request:
+    paths:
+      - 'server/**'
+      - 'npclient/**'
+      - '.github/workflows/windows.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write        # needed to attach the exe to a release
+
+jobs:
+  exe:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            npclient
+            server
+
+      # The server embeds NPClient64.dll and TrackIR.exe from here, so this
+      # has to come first.
+      - name: Build npclient
+        working-directory: npclient
+        run: cargo build --release
+
+      - name: Build the launcher
+        working-directory: server
+        run: cargo build --release
+
+      - name: Name it
+        shell: bash
+        run: |
+          ver=$(sed -n 's/^version = "\(.*\)"/\1/p' server/Cargo.toml | head -1)
+          mkdir -p out
+          cp server/target/release/CorsaConnect.exe out/CorsaConnect.exe
+          cp server/target/release/CorsaConnect.exe "out/CorsaConnect-${ver}-build${GITHUB_RUN_NUMBER}.exe"
+          ls -l out
+
+      - name: Upload the exe to the run
+        uses: actions/upload-artifact@v4
+        with:
+          name: CorsaConnect-exe
+          path: out/CorsaConnect.exe
+          if-no-files-found: error
+
+      - name: Publish it as a pre-release
+        if: github.event_name != 'pull_request'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: exe-build-${{ github.run_number }}
+          name: CorsaConnect EXE build ${{ github.run_number }}
+          prerelease: true
+          files: out/CorsaConnect-*.exe
+          body: |
+            CorsaConnect.exe (the PC launcher and server), built on Windows from
+            `${{ github.sha }}` (branch `${{ github.ref_name }}`).
+
+            Download it and run it - a single file, no install. Needs the vJoy
+            (or ViGEmBus) driver as before. Unsigned, so Windows SmartScreen may
+            ask you to confirm the first time ("More info" > "Run anyway").
