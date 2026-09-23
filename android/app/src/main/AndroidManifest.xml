@@ -2,6 +2,8 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Hear the PC's discovery beacon (some phones drop Wi-Fi broadcasts otherwise). -->
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
     <!-- Force-feedback: the wheel buzzes for engine, shifts, grind and slides. -->
     <uses-permission android:name="android.permission.VIBRATE" />
 

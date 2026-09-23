@@ -73,7 +73,9 @@ class MainActivity : ComponentActivity() {
     @Volatile private var shiftMask = 0
     @Volatile private var hapticsActive = false
 
-    private var network: NetworkService? = null
+    private lateinit var network: NetworkService
+    /** The PC whose beacon we last heard, if any. */
+    private var foundPc by mutableStateOf<String?>(null)
     private var latestTelemetry by mutableStateOf(Protocol.Telemetry())
 
     /** Sticky immersive fullscreen: no status/nav bars, no accidental taps on
@@ -120,32 +122,8 @@ class MainActivity : ComponentActivity() {
             )
         }
 
-        setContent {
-            MaterialTheme(colorScheme = darkColorScheme()) {
-                Root()
-            }
-        }
-    }
-
-    override fun onResume() { super.onResume(); steering.start() }
-    override fun onPause() { super.onPause(); steering.stop() }
-    override fun onDestroy() { super.onDestroy(); network?.stop(); haptics.stop() }
-
-    private fun applyTuning(c: Config) {
-        steering.sensitivity = c.sensitivity
-        steering.deadZone = c.deadZone
-        // Past 180° the wheel angle comes from the gyro's turn count, so a
-        // device without one can't reach a lock angle bigger than that.
-        val lockDeg = if (steering.hasGyro) c.maxAngleDeg else c.maxAngleDeg.coerceAtMost(180f)
-        steering.maxAngleRad = Math.toRadians(lockDeg.toDouble()).toFloat()
-        useWheel = c.touchWheel
-        haptics.settings = c.hapticSettings()
-    }
-
-    private fun connect(ip: String) {
-        network?.stop()
         network = NetworkService(
-            serverIp = ip,
+            context = this,
             inputProvider = {
                 Protocol.Input(
                     steer = if (useWheel)
@@ -160,7 +138,33 @@ class MainActivity : ComponentActivity() {
                 )
             },
             onTelemetry = { latestTelemetry = it },
-        ).also { it.start() }
+            onServerFound = { ip -> if (foundPc != ip) runOnUiThread { foundPc = ip } },
+        ).also { it.open() }
+
+        setContent {
+            MaterialTheme(colorScheme = darkColorScheme()) {
+                Root()
+            }
+        }
+    }
+
+    override fun onResume() { super.onResume(); steering.start() }
+    override fun onPause() { super.onPause(); steering.stop() }
+    override fun onDestroy() { super.onDestroy(); network.close(); haptics.stop() }
+
+    private fun applyTuning(c: Config) {
+        steering.sensitivity = c.sensitivity
+        steering.deadZone = c.deadZone
+        // Past 180° the wheel angle comes from the gyro's turn count, so a
+        // device without one can't reach a lock angle bigger than that.
+        val lockDeg = if (steering.hasGyro) c.maxAngleDeg else c.maxAngleDeg.coerceAtMost(180f)
+        steering.maxAngleRad = Math.toRadians(lockDeg.toDouble()).toFloat()
+        useWheel = c.touchWheel
+        haptics.settings = c.hapticSettings()
+    }
+
+    private fun connect(ip: String) {
+        network.connect(ip)
         hapticsActive = true
         haptics.start()
     }
@@ -168,7 +172,7 @@ class MainActivity : ComponentActivity() {
     private fun disconnect() {
         hapticsActive = false
         haptics.stop()
-        network?.stop()
+        network.disconnect()
     }
 
     @Composable
@@ -290,9 +294,18 @@ class MainActivity : ComponentActivity() {
             store.save(config)
         }
 
+        // The PC announces itself on the LAN; fill its IP in for the user.
+        LaunchedEffect(foundPc) {
+            val pc = foundPc
+            if (pc != null && pc != config.serverIp) {
+                config = config.copy(serverIp = pc); store.save(config)
+            }
+        }
+
         if (!connected) {
             StartScreen(
                 ip = config.serverIp,
+                found = foundPc != null && foundPc == config.serverIp,
                 onIpChange = { config = config.copy(serverIp = it); store.save(config) },
                 onConnect = { connect(config.serverIp); connected = true },
             )
@@ -586,6 +599,7 @@ class MainActivity : ComponentActivity() {
             ControlType.ENGINE_TEMP ->
                 ReadoutOf(lcd, fmtTemp(t.engineTemp, config.imperial), tempUnit(config.imperial), cells = 3)
             ControlType.DASH_LIGHTS -> DashLights(t.showLights, lcd)
+            ControlType.TURN_SIGNALS -> TurnSignals(t.showLights, lcd)
             ControlType.STEERING_BAR -> SteeringBar(steerDisplay, lcd)
             ControlType.STEERING_WHEEL -> SteeringWheel(
                 maxAngleRad = Math.toRadians(config.maxAngleDeg.toDouble()).toFloat(),
@@ -695,6 +709,46 @@ private fun DashLights(showLights: Int, lcd: Boolean = false) {
                 },
             )
         }
+    }
+}
+
+/**
+ * The two blinker arrows. OutGauge's 0x20 / 0x40 bits are the lamps as the
+ * game flashes them, so the arrows blink by themselves; both at once is the
+ * hazards. Modern: green/dim. Vapor: LCD dark/dim.
+ */
+@Composable
+private fun TurnSignals(showLights: Int, lcd: Boolean = false) {
+    val left = (showLights and 0x20) != 0
+    val right = (showLights and 0x40) != 0
+    fun colour(on: Boolean) = when {
+        lcd -> if (on) LCD_DARK else LCD_DIM
+        on -> Color(0xFF2EE05A)
+        else -> Color(0xFF2A2A33)
+    }
+    Canvas(Modifier.fillMaxSize().then(if (lcd) Modifier.background(LCD_BG) else Modifier)) {
+        // Each arrow gets a square at its end of the box, a quarter of it apart.
+        val s = min(size.height, size.width * 0.4f) * 0.8f
+        val cy = size.height / 2f
+        val pad = (size.height - s) / 2f
+        fun arrow(pointsLeft: Boolean, on: Boolean) {
+            val tip = if (pointsLeft) pad else size.width - pad
+            val back = if (pointsLeft) tip + s else tip - s
+            val shaft = if (pointsLeft) tip + s * 0.5f else tip - s * 0.5f
+            val path = androidx.compose.ui.graphics.Path().apply {
+                moveTo(tip, cy)
+                lineTo(shaft, cy - s / 2f)
+                lineTo(shaft, cy - s / 5f)
+                lineTo(back, cy - s / 5f)
+                lineTo(back, cy + s / 5f)
+                lineTo(shaft, cy + s / 5f)
+                lineTo(shaft, cy + s / 2f)
+                close()
+            }
+            drawPath(path, colour(on))
+        }
+        arrow(true, left)
+        arrow(false, right)
     }
 }
 
@@ -995,9 +1049,14 @@ private fun Thumbstick(
     }
 }
 
-/** Landing screen: type the PC's IP and connect. */
+/** Landing screen: the PC's IP (found on the LAN, or typed) and Connect. */
 @Composable
-private fun StartScreen(ip: String, onIpChange: (String) -> Unit, onConnect: () -> Unit) {
+private fun StartScreen(
+    ip: String,
+    found: Boolean,
+    onIpChange: (String) -> Unit,
+    onConnect: () -> Unit,
+) {
     Surface(Modifier.fillMaxSize(), color = Color(0xFF0E0E12)) {
         Column(
             Modifier.fillMaxSize().padding(24.dp),
@@ -1026,7 +1085,7 @@ private fun StartScreen(ip: String, onIpChange: (String) -> Unit, onConnect: () 
                 Text("Connect", fontSize = 18.sp, fontWeight = FontWeight.Bold)
             }
             Text(
-                "Shown on the PC launcher.",
+                if (found) "PC found on this Wi-Fi." else "Searching for the PC… or type the IP shown on the launcher.",
                 color = Color(0xFF6A6A75),
                 fontSize = 12.sp,
                 modifier = Modifier.padding(top = 12.dp),
@@ -1223,6 +1282,7 @@ private fun EditBar(
                     "Fuel" to ControlType.FUEL,
                     "Engine temp" to ControlType.ENGINE_TEMP,
                     "Dash lights" to ControlType.DASH_LIGHTS,
+                    "Turn signals" to ControlType.TURN_SIGNALS,
                 )
                 items.forEach { (name, type) ->
                     DropdownMenuItem(text = { Text(name) }, onClick = { onAdd(type); addMenu = false })

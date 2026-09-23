@@ -2,6 +2,8 @@
 //!
 //! Phone -> server : `InputPacket` (14 bytes). Sent ~60Hz, drives the virtual pad.
 //! Server -> phone : `TelemetryPacket` (compact, parsed from BeamNG OutGauge).
+//! Server -> LAN   : beacon (`"CD"` + version), broadcast once a second so the
+//!                   phone can find the PC and the PC needs no firewall rule.
 //!
 //! Everything is little-endian. We keep the input packet tiny and fixed-size so
 //! parsing is a few slice reads and latency stays minimal.
@@ -23,6 +25,14 @@ pub const INPUT_MAGIC: &[u8; 2] = b"CC";
 /// Magic prefix for server -> phone telemetry packets.
 pub const TELEMETRY_MAGIC: &[u8; 2] = b"CT";
 pub const PROTO_VERSION: u8 = 7;
+/// Magic prefix for the server's "I'm here" beacon.
+pub const BEACON_MAGIC: &[u8; 2] = b"CD";
+
+/// The beacon: magic + version, nothing else. The phone learns the PC's
+/// address from where it came from.
+pub fn beacon() -> [u8; 3] {
+    [BEACON_MAGIC[0], BEACON_MAGIC[1], PROTO_VERSION]
+}
 
 /// Decoded controller input coming from the phone.
 #[derive(Debug, Clone, Copy)]
