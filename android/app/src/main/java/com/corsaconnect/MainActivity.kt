@@ -599,6 +599,7 @@ class MainActivity : ComponentActivity() {
             ControlType.ENGINE_TEMP ->
                 ReadoutOf(lcd, fmtTemp(t.engineTemp, config.imperial), tempUnit(config.imperial), cells = 3)
             ControlType.DASH_LIGHTS -> DashLights(t.showLights, lcd)
+            ControlType.TURN_SIGNALS -> TurnSignals(t.showLights, lcd)
             ControlType.STEERING_BAR -> SteeringBar(steerDisplay, lcd)
             ControlType.STEERING_WHEEL -> SteeringWheel(
                 maxAngleRad = Math.toRadians(config.maxAngleDeg.toDouble()).toFloat(),
@@ -708,6 +709,46 @@ private fun DashLights(showLights: Int, lcd: Boolean = false) {
                 },
             )
         }
+    }
+}
+
+/**
+ * The two blinker arrows. OutGauge's 0x20 / 0x40 bits are the lamps as the
+ * game flashes them, so the arrows blink by themselves; both at once is the
+ * hazards. Modern: green/dim. Vapor: LCD dark/dim.
+ */
+@Composable
+private fun TurnSignals(showLights: Int, lcd: Boolean = false) {
+    val left = (showLights and 0x20) != 0
+    val right = (showLights and 0x40) != 0
+    fun colour(on: Boolean) = when {
+        lcd -> if (on) LCD_DARK else LCD_DIM
+        on -> Color(0xFF2EE05A)
+        else -> Color(0xFF2A2A33)
+    }
+    Canvas(Modifier.fillMaxSize().then(if (lcd) Modifier.background(LCD_BG) else Modifier)) {
+        // Each arrow gets a square at its end of the box, a quarter of it apart.
+        val s = min(size.height, size.width * 0.4f) * 0.8f
+        val cy = size.height / 2f
+        val pad = (size.height - s) / 2f
+        fun arrow(pointsLeft: Boolean, on: Boolean) {
+            val tip = if (pointsLeft) pad else size.width - pad
+            val back = if (pointsLeft) tip + s else tip - s
+            val shaft = if (pointsLeft) tip + s * 0.5f else tip - s * 0.5f
+            val path = androidx.compose.ui.graphics.Path().apply {
+                moveTo(tip, cy)
+                lineTo(shaft, cy - s / 2f)
+                lineTo(shaft, cy - s / 5f)
+                lineTo(back, cy - s / 5f)
+                lineTo(back, cy + s / 5f)
+                lineTo(shaft, cy + s / 5f)
+                lineTo(shaft, cy + s / 2f)
+                close()
+            }
+            drawPath(path, colour(on))
+        }
+        arrow(true, left)
+        arrow(false, right)
     }
 }
 
@@ -1241,6 +1282,7 @@ private fun EditBar(
                     "Fuel" to ControlType.FUEL,
                     "Engine temp" to ControlType.ENGINE_TEMP,
                     "Dash lights" to ControlType.DASH_LIGHTS,
+                    "Turn signals" to ControlType.TURN_SIGNALS,
                 )
                 items.forEach { (name, type) ->
                     DropdownMenuItem(text = { Text(name) }, onClick = { onAdd(type); addMenu = false })

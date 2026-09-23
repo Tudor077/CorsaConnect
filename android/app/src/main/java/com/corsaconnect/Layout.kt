@@ -25,6 +25,7 @@ enum class ControlType {
     FUEL,            // fuel level %
     ENGINE_TEMP,     // engine temperature (C/F)
     DASH_LIGHTS,     // lit dash indicators (ABS, TC, handbrake, ...)
+    TURN_SIGNALS,    // the two blinker arrows, flashing with the car's own
 }
 
 /** Visual skin for the gauges/readouts. */
@@ -102,6 +103,7 @@ data class Element(
                 ControlType.TURBO -> 0.14f to 0.34f
                 ControlType.FUEL, ControlType.ENGINE_TEMP -> 0.12f to 0.16f
                 ControlType.DASH_LIGHTS -> 0.3f to 0.1f
+                ControlType.TURN_SIGNALS -> 0.2f to 0.14f
                 ControlType.THROTTLE_SLIDER, ControlType.BRAKE_SLIDER, ControlType.CLUTCH_SLIDER -> 0.12f to 0.6f
                 // Roughly square on a typical 20:9 phone held sideways.
                 ControlType.JOYSTICK -> 0.22f to 0.5f

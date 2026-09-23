@@ -92,6 +92,8 @@ private fun readoutNeed(el: Element, t: Protocol.Telemetry, config: Config): Pai
         // four characters plus a pixel either side, with a gap between each.
         ControlType.DASH_LIGHTS -> 6 * (4 * 6 + 4) + 5 to 13
         ControlType.STEERING_BAR -> 24 to 11
+        // Two nine-pixel arrows, the panel's own, with room between them.
+        ControlType.TURN_SIGNALS -> 30 to 13
         else -> 16 to 16
     }
 
@@ -130,6 +132,7 @@ private fun Pix.readout(el: Element, t: Protocol.Telemetry, config: Config, stee
             big(v.roundToInt().toString(), if (config.imperial) "mph" else "km/h")
         }
         ControlType.DASH_LIGHTS -> dashLights(t.showLights)
+        ControlType.TURN_SIGNALS -> turnSignals(t.showLights)
         ControlType.STEERING_BAR -> steeringBar(steer)
         ControlType.PANEL_SCREEN -> Unit    // drawn by PanelScreen, its own grid
         else -> Unit
@@ -182,6 +185,31 @@ private fun Pix.dashLights(showLights: Int) {
     items.forEachIndexed { i, (name, bit) ->
         tag(name, i * (each + gap), top, each, h, size, (showLights and bit) != 0)
     }
+}
+
+/**
+ * The blinker arrows, the same triangle the panel draws on its GAME page: filled
+ * while the lamp is lit, outlined while it isn't, so you can still see where
+ * they are.
+ */
+private fun Pix.turnSignals(showLights: Int) {
+    val h = minOf(rows - (rows + 1) % 2, 13)     // odd, so the tip is one pixel
+    val half = h / 2
+    val cy = rows / 2
+    val len = half + 2
+    fun arrow(left: Boolean, on: Boolean) {
+        val tip = if (left) 0 else cols - 1
+        val back = if (left) len else cols - 1 - len
+        if (on) {
+            triangle(tip, cy, back, cy - half, back, cy + half)
+        } else {
+            line(tip, cy, back, cy - half)
+            line(tip, cy, back, cy + half)
+            line(back, cy - half, back, cy + half)
+        }
+    }
+    arrow(true, (showLights and 0x20) != 0)
+    arrow(false, (showLights and 0x40) != 0)
 }
 
 /** The steering indicator: a centre tick and a block that slides along it. */

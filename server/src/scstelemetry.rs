@@ -39,6 +39,10 @@ const OFF_BOOLS: usize = 1500; // start of the truck bool channels
 const B_PARK_BRAKE: usize = 0;
 const B_OIL_WARN: usize = 6;
 const B_BATTERY_WARN: usize = 8;
+// The lamps themselves, flashing as they do on the dash - not the
+// "blinkerLeftActive" pair before them, which stays on while the stalk is down.
+const B_BLINKER_LEFT_ON: usize = 14;
+const B_BLINKER_RIGHT_ON: usize = 15;
 const B_HIGH_BEAM: usize = 18;
 
 /// A read-only view of the SCS telemetry shared memory. Keeping the handle open
@@ -108,7 +112,8 @@ impl ScsShared {
         self.f32_at(OFF_WATER_TEMP)
     }
 
-    /// Warning lights mapped to our dash-light bitmask (HBRK/OIL/BATT/BEAM).
+    /// Warning lights mapped to our dash-light bitmask (HBRK/OIL/BATT/BEAM and
+    /// the two turn signals, OutGauge's 0x20 left / 0x40 right).
     pub fn show_lights(&self) -> u32 {
         let mut m = 0u32;
         if self.bool_at(OFF_BOOLS + B_PARK_BRAKE) {
@@ -122,6 +127,12 @@ impl ScsShared {
         }
         if self.bool_at(OFF_BOOLS + B_HIGH_BEAM) {
             m |= 0x2; // BEAM
+        }
+        if self.bool_at(OFF_BOOLS + B_BLINKER_LEFT_ON) {
+            m |= 0x20;
+        }
+        if self.bool_at(OFF_BOOLS + B_BLINKER_RIGHT_ON) {
+            m |= 0x40;
         }
         m
     }

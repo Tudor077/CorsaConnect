@@ -189,6 +189,7 @@ Little-endian throughout.
 Tap **✎ Edit** on the phone to enter layout mode: drag any control to move it,
 drag the blue corner handle to resize, tap a button to rebind it to any XInput
 button (A/B/X/Y/LB/RB/Start/…) or rename it, and use **+ Add** to drop in new
-buttons or widgets (analog speedometer / tachometer, gear, speed, joystick). **⚙ Settings**
+buttons or widgets (analog speedometer / tachometer, gear, speed, joystick, turn
+signals). **⚙ Settings**
 tunes steering sensitivity, dead zone, max angle, and gauge ranges. The layout is
 saved per device and restored on launch; **Reset** restores the stock layout.
