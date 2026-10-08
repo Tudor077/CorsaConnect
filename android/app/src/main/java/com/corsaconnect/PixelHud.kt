@@ -50,7 +50,7 @@ fun PixelElement(
     wheelReset: Int,
     onSteer: (Float) -> Unit,
     onPedal: (Int) -> Unit,
-    onMask: (Int, Boolean) -> Unit,
+    onPressed: (Boolean) -> Unit,
     onJoy: (Float, Float) -> Unit,
 ) {
     when (el.type) {
@@ -60,7 +60,7 @@ fun PixelElement(
         ControlType.GAS -> PixelHold(el.label, enabled, cell) { onPedal(if (it) 255 else 0) }
         ControlType.BRAKE -> PixelHold(el.label, enabled, cell) { onPedal(if (it) 255 else 0) }
 
-        ControlType.BUTTON -> PixelButton(el, enabled, cell, onMask)
+        ControlType.BUTTON -> PixelButton(el, enabled, cell, onPressed)
         ControlType.JOYSTICK -> PixelStick(el.label, el.momentary, enabled, cell, onJoy)
 
         ControlType.STEERING_WHEEL ->
@@ -306,11 +306,10 @@ private fun PixelHold(
 
 @Composable
 private fun PixelButton(
-    el: Element, enabled: Boolean, cell: Float, onMask: (Int, Boolean) -> Unit,
+    el: Element, enabled: Boolean, cell: Float, onPressed: (Boolean) -> Unit,
 ) {
     var toggled by remember(el.id) { mutableStateOf(false) }
     var down by remember { mutableStateOf(false) }
-    val mask = el.button or el.button2
     val label = el.label.ifBlank { XInput.comboName(el.button, el.button2) }
     val haptic = LocalHapticFeedback.current
     Canvas(
@@ -320,11 +319,11 @@ private fun PixelButton(
                     haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                     if (el.momentary) {
                         down = true
-                        onMask(mask, true)
-                        try { awaitRelease() } finally { down = false; onMask(mask, false) }
+                        onPressed(true)
+                        try { awaitRelease() } finally { down = false; onPressed(false) }
                     } else {
                         toggled = !toggled
-                        onMask(mask, toggled)
+                        onPressed(toggled)
                         awaitRelease()
                     }
                 })

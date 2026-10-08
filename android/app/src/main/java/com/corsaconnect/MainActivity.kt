@@ -40,7 +40,9 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.rotate
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import org.json.JSONObject
 import kotlin.math.atan2
 import kotlin.math.hypot
@@ -67,6 +69,69 @@ class MainActivity : ComponentActivity() {
     // On-screen wheel: -1..1 written by the wheel widget, read when useWheel is on.
     @Volatile private var wheelSteer = 0f
     @Volatile private var useWheel = false
+
+    /**
+     * How long the second input of a combo waits behind the first.
+     *
+     * Both used to go out in the same packet, which is one controller report:
+     * the game sees them pressed on the same frame and, for a pair like D-Up
+     * and Y, acts on one and ignores the other. Four frames apart at 60 Hz is
+     * enough for them to read as two presses while still feeling like one.
+     */
+    private val comboGapMs = 60L
+
+    /**
+     * The press that currently owns each combo button.
+     *
+     * The second input goes out from a coroutine, so by the time it fires the
+     * finger may already be gone - and setting a bit after the release would
+     * leave it stuck down for good. Identity says whether this is still the
+     * same press that started it.
+     */
+    private class Combo { var secondSent = false }
+    private val combos = mutableMapOf<String, Combo>()
+
+    /** How long both inputs stay down when a tap was shorter than the gap. */
+    private val comboTailMs = 40L
+
+    /** Press or release a button, staging the second input if it has one. */
+    private fun setButton(el: Element, on: Boolean, scope: CoroutineScope) {
+        val first = el.button
+        val second = el.button2
+        val both = first or second
+
+        if (on) {
+            val press = Combo()
+            combos[el.id] = press
+            buttonsState = buttonsState or first
+            if (second != 0) {
+                scope.launch {
+                    delay(comboGapMs)
+                    if (combos[el.id] === press) {
+                        buttonsState = buttonsState or second
+                        press.secondSent = true
+                    }
+                }
+            }
+            return
+        }
+
+        val press = combos.remove(el.id)
+        if (second == 0 || press == null || press.secondSent) {
+            buttonsState = buttonsState and both.inv()
+            return
+        }
+        // Let go sooner than the gap. Clearing now would send the first input
+        // alone and drop the second entirely - the very thing the gap is here
+        // to fix - so the sequence is finished off the finger instead.
+        scope.launch {
+            delay(comboGapMs)
+            if (combos[el.id] != null) return@launch   // pressed again meanwhile
+            buttonsState = buttonsState or second
+            delay(comboTailMs)
+            if (combos[el.id] == null) buttonsState = buttonsState and both.inv()
+        }
+    }
 
     // For haptics: OR of the masks of buttons flagged as gear shifts, and whether
     // telemetry is expected to be flowing (i.e. we're connected).
@@ -556,6 +621,7 @@ class MainActivity : ComponentActivity() {
     ) {
         val t = latestTelemetry
         val lcd = config.design == Design.VAPOR
+        val pixelScope = rememberCoroutineScope()
         // The pixel skin replaces every widget rather than restyling them, so
         // it gets its own renderer and the rest of this function is untouched.
         if (config.design == Design.PIXEL && el.type != ControlType.PANEL_SCREEN) {
@@ -575,9 +641,7 @@ class MainActivity : ComponentActivity() {
                         else -> throttle = v
                     }
                 },
-                onMask = { mask, on ->
-                    buttonsState = if (on) buttonsState or mask else buttonsState and mask.inv()
-                },
+                onPressed = { on -> setButton(el, on, pixelScope) },
                 onJoy = { x, y -> joyX = x; joyY = y },
             )
             return
@@ -641,7 +705,7 @@ class MainActivity : ComponentActivity() {
     private fun XButton(el: Element, enabled: Boolean, lcd: Boolean = false) {
         var toggled by remember(el.id) { mutableStateOf(false) }
         val active = toggled
-        val mask = el.button or el.button2 // press both at once for a combo
+        val scope = rememberCoroutineScope()
         PedalButton(
             label = el.label.ifBlank { XInput.comboName(el.button, el.button2) },
             color = when {
@@ -654,10 +718,10 @@ class MainActivity : ComponentActivity() {
             lcd = lcd,
         ) { pressed ->
             if (el.momentary) {
-                buttonsState = if (pressed) buttonsState or mask else buttonsState and mask.inv()
+                setButton(el, pressed, scope)
             } else if (pressed) {
                 toggled = !toggled
-                buttonsState = if (toggled) buttonsState or mask else buttonsState and mask.inv()
+                setButton(el, toggled, scope)
             }
         }
     }
