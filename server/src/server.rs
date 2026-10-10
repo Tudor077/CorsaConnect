@@ -175,6 +175,63 @@ fn decay_impact(impact: f32, at: Instant, now: Instant) -> f32 {
     }
 }
 
+/// How long flat-out revs must hold still to count as the rev limiter.
+const PLATEAU: Duration = Duration::from_millis(600);
+
+/// Finds the rev limiter as the rpm the engine *holds* flat-out: bouncing off
+/// the cut, revs stay in a narrow band with no trend. The highest rpm ever seen
+/// is no good - a missed downshift or an engine-braking overrev spikes past the
+/// limiter for a moment and would stretch the tach. Those spikes are short (and
+/// usually off-throttle), so they never fill a [PLATEAU] window and are ignored.
+///
+/// A plateau below the limiter (top speed in top gear) can be taken first; any
+/// later plateau higher up replaces it, so the guess only ever corrects upward.
+#[derive(Default)]
+struct LimiterFinder {
+    /// Recent flat-out samples, oldest first; cleared when the throttle lifts.
+    window: VecDeque<(Instant, f32)>,
+    /// The limiter found so far, 0 until then.
+    limiter: f32,
+}
+
+impl LimiterFinder {
+    /// Feed one telemetry sample. Returns the new limiter when one is found.
+    fn feed(&mut self, now: Instant, rpm: f32, throttle: f32) -> Option<f32> {
+        if throttle < 0.85 {
+            self.window.clear();
+            return None;
+        }
+        self.window.push_back((now, rpm));
+        while self
+            .window
+            .front()
+            .is_some_and(|&(t, _)| now.saturating_duration_since(t) > PLATEAU)
+        {
+            self.window.pop_front();
+        }
+        let span = now.saturating_duration_since(self.window.front()?.0);
+        if span < PLATEAU * 9 / 10 || self.window.len() < 8 {
+            return None;
+        }
+        let (mut lo, mut hi) = (f32::MAX, 0.0f32);
+        for &(_, r) in &self.window {
+            lo = lo.min(r);
+            hi = hi.max(r);
+        }
+        // The cut makes revs saw up and down a few hundred rpm, but they don't drift.
+        let half = self.window.len() / 2;
+        let mean = |s: &mut dyn Iterator<Item = f32>, n: usize| s.sum::<f32>() / n as f32;
+        let early = mean(&mut self.window.iter().take(half).map(|s| s.1), half);
+        let late = mean(&mut self.window.iter().skip(half).map(|s| s.1), self.window.len() - half);
+        let flat = hi - lo <= hi * 0.08 && (late - early).abs() <= hi * 0.015;
+        if hi < 2500.0 || !flat || hi <= self.limiter * 1.02 {
+            return None;
+        }
+        self.limiter = hi;
+        Some(hi)
+    }
+}
+
 /// The one UDP socket the phone talks to, and where the phone is.
 ///
 /// Everything to and from the phone goes through this socket on
@@ -578,15 +635,13 @@ fn telemetry_relay(shared: Arc<Shared>, stop: Arc<AtomicBool>, link: Arc<PhoneLi
 
     let mut buf = [0u8; 128];
     let mut announced = false;
-    // Redline = the rev limiter, found as the rpm where flat-out the engine stops
-    // climbing (the rev cut). Until then the tach stays large with no red zone, so
-    // a fresh car looks normal at idle instead of pinning the needle to a tiny
-    // redline; once the limiter is learned the gauge shrinks down to it.
+    // Redline = the rev limiter (see [LimiterFinder]). Until it's found the tach
+    // stays large with no red zone, so a fresh car looks normal at idle instead
+    // of pinning the needle to a tiny redline; then the gauge shrinks down to it.
     // BeamNG's OutGauge has no per-car id (`car` is always "beam") and never sets
     // the shift-light bit, so a pause in the stream is our only "car changed" cue.
     let mut peak_rpm = 0.0f32;
-    let mut frames_since_peak = 0u32;
-    let mut limiter = 0.0f32;
+    let mut finder = LimiterFinder::default();
     let mut idle_ticks = 0u32;
     while !stop.load(Ordering::Relaxed) {
         let (n, _) = match sock.recv_from(&mut buf) {
@@ -627,28 +682,17 @@ fn telemetry_relay(shared: Arc<Shared>, stop: Arc<AtomicBool>, link: Arc<PhoneLi
         // A long pause in the stream (radial menu, vehicle spawn, world reload)
         // usually means a possible car change - relearn the rev range. gap counts
         // 250 ms read timeouts, so >=6 is ~1.5 s of silence.
-        if gap >= 6 && (peak_rpm > 0.0 || limiter > 0.0) {
+        if gap >= 6 && (peak_rpm > 0.0 || finder.limiter > 0.0) {
             peak_rpm = 0.0;
-            limiter = 0.0;
-            frames_since_peak = 0;
+            finder = LimiterFinder::default();
             shared.log("Telemetry resumed - relearning rev range.");
         }
 
-        // Track the peak rpm and how long since it last rose.
-        if tel.rpm > peak_rpm {
-            peak_rpm = tel.rpm;
-            frames_since_peak = 0;
-            if peak_rpm > limiter + 100.0 {
-                limiter = 0.0; // revved past the supposed limiter -> relearn higher
-            }
-        } else {
-            frames_since_peak = frames_since_peak.saturating_add(1);
+        peak_rpm = peak_rpm.max(tel.rpm);
+        if let Some(found) = finder.feed(Instant::now(), tel.rpm, tel.throttle) {
+            shared.log(format!("Redline found: {found:.0} rpm."));
         }
-        // Rev limiter: flat-out, high rpm, and the peak hasn't moved for a moment.
-        if limiter == 0.0 && tel.throttle > 0.85 && peak_rpm > 3000.0 && frames_since_peak >= 30 {
-            limiter = peak_rpm;
-            shared.log(format!("Redline learned: {:.0} rpm.", limiter));
-        }
+        let limiter = finder.limiter;
 
         // Big gauge with no red until the limiter is known; then shrink to it.
         if limiter > 0.0 {
@@ -809,5 +853,61 @@ mod tests {
         assert_eq!(packet.len(), 86);
         assert_eq!(&packet[..2], b"CT");
         assert_eq!(packet[2], crate::protocol::PROTO_VERSION);
+    }
+
+    /// Plays `rpm(i)` / `throttle(i)` at 60 Hz for `secs` and returns the limiter.
+    /// The clock carries on across calls, so `drive`s chain like one session.
+    fn drive(f: &mut Sim, secs: f32, sample: impl Fn(usize) -> (f32, f32)) -> f32 {
+        for i in 0..(secs * 60.0) as usize {
+            let (rpm, throttle) = sample(i);
+            f.now += Duration::from_micros(16_667);
+            f.finder.feed(f.now, rpm, throttle);
+        }
+        f.finder.limiter
+    }
+
+    struct Sim {
+        finder: LimiterFinder,
+        now: Instant,
+    }
+
+    fn sim() -> Sim {
+        Sim { finder: LimiterFinder::default(), now: Instant::now() }
+    }
+
+    /// Bouncing off a 7000 rpm cut (dropping ~300 rpm each time) is the limiter.
+    #[test]
+    fn limiter_is_where_revs_bounce() {
+        let mut f = sim();
+        let found = drive(&mut f, 2.0, |i| (if i % 6 < 3 { 7000.0 } else { 6700.0 }, 1.0));
+        assert_eq!(found, 7000.0);
+    }
+
+    /// The bug: a money shift spikes to 9500 for a moment. That must not move it.
+    #[test]
+    fn overrev_spikes_are_ignored() {
+        let mut f = sim();
+        drive(&mut f, 2.0, |i| (if i % 6 < 3 { 7000.0 } else { 6700.0 }, 1.0));
+        // Off-throttle downshift spike, then on-throttle spike falling fast.
+        drive(&mut f, 0.3, |i| (9500.0 - i as f32 * 100.0, 0.0));
+        let after = drive(&mut f, 0.4, |i| (9500.0 - i as f32 * 120.0, 1.0));
+        assert_eq!(after, 7000.0);
+    }
+
+    /// Pulling through the revs is not a plateau, however slowly it climbs.
+    #[test]
+    fn a_steady_climb_is_not_the_limiter() {
+        let mut f = sim();
+        assert_eq!(drive(&mut f, 6.0, |i| (3000.0 + i as f32 * 12.0, 1.0)), 0.0);
+    }
+
+    /// Flat out at top speed below the cut gets taken, then the real one wins.
+    #[test]
+    fn a_higher_plateau_replaces_a_lower_one() {
+        let mut f = sim();
+        assert_eq!(drive(&mut f, 1.5, |_| (5600.0, 1.0)), 5600.0);
+        assert_eq!(drive(&mut f, 1.5, |i| (if i % 6 < 3 { 7200.0 } else { 6900.0 }, 1.0)), 7200.0);
+        // And a lower plateau afterwards doesn't pull it back down.
+        assert_eq!(drive(&mut f, 1.5, |_| (5600.0, 1.0)), 7200.0);
     }
 }
