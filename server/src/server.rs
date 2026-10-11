@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::engineinfo::{self, EngineInfo, ENGINEINFO_PORT};
 use crate::motionsim;
 use crate::outgauge;
 use crate::protocol::{InputPacket, TelemetryPacket};
@@ -22,6 +23,8 @@ const INPUT_PORT: u16 = 5000;
 const OUTGAUGE_PORT: u16 = 4444;
 /// Port BeamNG's MotionSim/OutSim protocol targets (slide + crash physics).
 const MOTIONSIM_PORT: u16 = 4445;
+/// The BeamNG mod sends 4 times a second; this much silence means it stopped.
+const ENGINE_INFO_STALE: Duration = Duration::from_secs(2);
 /// How long a crash spike keeps fading after it lands.
 const IMPACT_DECAY: Duration = Duration::from_millis(350);
 /// Port on the phone that listens for telemetry (and for our beacon).
@@ -58,6 +61,7 @@ pub struct Status {
     pub phone: Option<IpAddr>,
     pub beamng: bool,
     pub motion: bool, // MotionSim packets are flowing (slide + crash feedback)
+    pub engine: bool, // the CorsaConnect BeamNG mod is sending the rpm range
     pub last: Option<(f32, f32, i8)>, // speed km/h, rpm, gear
     pub error: Option<String>,
 }
@@ -74,6 +78,8 @@ pub struct Shared {
     logs: Mutex<VecDeque<String>>,
     pub status: Mutex<Status>,
     motion: Mutex<MotionState>,
+    /// Latest rpm range from the BeamNG mod, and when it came.
+    engine: Mutex<Option<(EngineInfo, Instant)>>,
     /// Where to send a copy of every telemetry packet, if anywhere. See
     /// [env_mirror]; the launcher can change this while the server runs.
     mirror: Mutex<Option<SocketAddr>>,
@@ -93,6 +99,7 @@ impl Shared {
                 impact: 0.0,
                 impact_at: Instant::now(),
             }),
+            engine: Mutex::new(None),
             mirror: Mutex::new(env_mirror()),
             mirror_sent: AtomicU64::new(0),
             head: crate::headtracker::HeadShared::default(),
@@ -115,6 +122,13 @@ impl Shared {
     fn motion_snapshot(&self) -> (f32, f32) {
         let m = self.motion.lock().unwrap();
         (m.slip, decay_impact(m.impact, m.impact_at, Instant::now()))
+    }
+
+    /// The rpm range from the BeamNG mod, if it's still coming in. The mod
+    /// only runs for the car being driven, so stale means "not this car".
+    fn engine_info(&self) -> Option<EngineInfo> {
+        let e = self.engine.lock().unwrap();
+        e.filter(|(_, at)| at.elapsed() < ENGINE_INFO_STALE).map(|(info, _)| info)
     }
 
     pub fn log(&self, msg: impl Into<String>) {
@@ -511,6 +525,11 @@ pub fn run(shared: Arc<Shared>, stop: Arc<AtomicBool>, game: Game, device: Devic
                 let stop = Arc::clone(&stop);
                 std::thread::spawn(move || motion_listener(shared, stop))
             });
+            telem.push({
+                let shared = Arc::clone(&shared);
+                let stop = Arc::clone(&stop);
+                std::thread::spawn(move || engine_listener(shared, stop))
+            });
         }
         Game::TruckSim => {
             telem.push({
@@ -682,17 +701,23 @@ fn telemetry_relay(shared: Arc<Shared>, stop: Arc<AtomicBool>, link: Arc<PhoneLi
         // A long pause in the stream (radial menu, vehicle spawn, world reload)
         // usually means a possible car change - relearn the rev range. gap counts
         // 250 ms read timeouts, so >=6 is ~1.5 s of silence.
+        // The mod's numbers win: they are the car's own, not a guess. Without
+        // it, learn the limiter from how the engine behaves.
+        let from_mod = shared.engine_info();
         if gap >= 6 && (peak_rpm > 0.0 || finder.limiter > 0.0) {
             peak_rpm = 0.0;
             finder = LimiterFinder::default();
-            shared.log("Telemetry resumed - relearning rev range.");
+            if from_mod.is_none() {
+                shared.log("Telemetry resumed - relearning rev range.");
+            }
         }
 
         peak_rpm = peak_rpm.max(tel.rpm);
-        if let Some(found) = finder.feed(Instant::now(), tel.rpm, tel.throttle) {
+        let found = finder.feed(Instant::now(), tel.rpm, tel.throttle);
+        if let (Some(found), None) = (found, from_mod) {
             shared.log(format!("Redline found: {found:.0} rpm."));
         }
-        let limiter = finder.limiter;
+        let limiter = from_mod.map_or(finder.limiter, |e| e.max_rpm);
 
         // Big gauge with no red until the limiter is known; then shrink to it.
         if limiter > 0.0 {
@@ -803,6 +828,40 @@ fn motion_listener(shared: Arc<Shared>, stop: Arc<AtomicBool>) {
     }
 }
 
+/// Listens for the CorsaConnect BeamNG mod (see [engineinfo]) and keeps the
+/// latest rpm range for the telemetry relay.
+fn engine_listener(shared: Arc<Shared>, stop: Arc<AtomicBool>) {
+    let sock = match UdpSocket::bind(("0.0.0.0", ENGINEINFO_PORT)) {
+        Ok(s) => s,
+        Err(e) => {
+            shared.log(format!("Could not bind engine info port {ENGINEINFO_PORT}: {e}"));
+            return;
+        }
+    };
+    if sock.set_read_timeout(Some(INPUT_TIMEOUT)).is_err() {
+        return;
+    }
+    let mut buf = [0u8; 64];
+    let mut last: Option<EngineInfo> = None;
+    while !stop.load(Ordering::Relaxed) {
+        let fresh = shared.engine_info().is_some();
+        shared.set_status(|s| s.engine = fresh);
+        let Ok((n, _)) = sock.recv_from(&mut buf) else { continue };
+        let Some(info) = engineinfo::parse(&buf[..n]) else { continue };
+        *shared.engine.lock().unwrap() = Some((info, Instant::now()));
+        if last != Some(info) {
+            shared.log(format!(
+                "BeamNG mod: rev range {:.0}-{:.0} rpm{}.",
+                info.idle_rpm,
+                info.max_rpm,
+                if info.rev_limiter { "" } else { " (no rev limiter)" }
+            ));
+            last = Some(info);
+        }
+    }
+    shared.set_status(|s| s.engine = false);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -853,6 +912,34 @@ mod tests {
         assert_eq!(packet.len(), 86);
         assert_eq!(&packet[..2], b"CT");
         assert_eq!(packet[2], crate::protocol::PROTO_VERSION);
+    }
+
+    /// A packet from the mod, over real UDP, reaches the relay - and stops
+    /// counting once the mod goes quiet (another car, or BeamNG closed).
+    #[test]
+    fn mod_packets_reach_the_relay() {
+        let shared = Shared::new();
+        let stop = Arc::new(AtomicBool::new(false));
+        let listener = {
+            let (shared, stop) = (Arc::clone(&shared), Arc::clone(&stop));
+            std::thread::spawn(move || engine_listener(shared, stop))
+        };
+        let mut pkt = vec![b'C', b'E', 1, 1];
+        pkt.extend_from_slice(&850.0f32.to_le_bytes());
+        pkt.extend_from_slice(&7200.0f32.to_le_bytes());
+        let tx = UdpSocket::bind(("127.0.0.1", 0)).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while shared.engine_info().is_none() && Instant::now() < deadline {
+            tx.send_to(&pkt, ("127.0.0.1", ENGINEINFO_PORT)).unwrap();
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert_eq!(shared.engine_info().map(|e| e.max_rpm), Some(7200.0));
+
+        // Pretend the last packet was long ago.
+        shared.engine.lock().unwrap().as_mut().unwrap().1 -= ENGINE_INFO_STALE;
+        assert!(shared.engine_info().is_none());
+        stop.store(true, Ordering::Relaxed);
+        listener.join().unwrap();
     }
 
     /// Plays `rpm(i)` / `throttle(i)` at 60 Hz for `secs` and returns the limiter.

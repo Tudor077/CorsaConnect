@@ -21,6 +21,7 @@ with more games on the way.
 │  • Webcam head tracking -> TrackIR -> any game    │
 │  • OutGauge  UDP :4444 -> parsed -> phone dash    │
 │  • MotionSim UDP :4445 -> slide + crash -> wheel  │
+│  • our mod   UDP :4446 -> real rev range -> tach  │
 │  • same telemetry -> PicoPanel  UDP :5051        │
 └──────────────────────────────────────────────────┘
 ```
@@ -150,6 +151,32 @@ clutch, RX/RY = the joystick widget (bind it to the look/camera axes if you add
 one), and the buttons in the order the launcher logs. In Xbox pad mode it's a
 360 pad: left stick X = steering, right trigger = throttle, left trigger =
 brake, LB/RB = shift down/up, A = handbrake.
+
+### The BeamNG mod (real rev range)
+
+OutGauge sends the rpm but not the car's rpm range, so on its own the server
+has to work out the redline: it watches for the rpm the engine *holds* at full
+throttle, bouncing off the rev cut. That works, but only after you've hit the
+limiter once, and a plateau below it (top speed in top gear) can fool it until
+you go higher.
+
+The mod in [`beamng/`](beamng) removes the guesswork. It's a single Lua file
+that adds a protocol to BeamNG and sends the numbers BeamNG's own tacho apps
+use: idle rpm and the **rev limiter**, straight from the engine, to UDP 4446 a
+few times a second. With it the tach fits each car from the moment it spawns,
+and an overrev can't stretch it.
+
+- **Install:** the launcher's **BEAMNG MOD** card has an **Install mod** button.
+  It writes the file to `%LOCALAPPDATA%\BeamNG\BeamNG.drive\current\mods\unpacked\corsaconnect\`.
+  Restart BeamNG once to load it. **Remove** deletes that folder and nothing else.
+- Or by hand: drop `CorsaConnect-BeamNG-mod.zip` from the release into your
+  BeamNG `mods` folder.
+- It runs under **Options -> Other -> Protocols -> Other protocols**, which is
+  on by default. There's no port to set.
+
+The launcher's **Rev range (CorsaConnect mod)** dot turns green while it's
+sending, and the log prints the range each time you change car. Without the
+mod everything still works; the redline is learned as above.
 
 ## Android app
 
