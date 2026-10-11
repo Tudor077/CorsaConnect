@@ -115,7 +115,6 @@ data class Element(
                 ControlType.GAS, ControlType.THROTTLE_SLIDER -> "GAS"
                 ControlType.BRAKE, ControlType.BRAKE_SLIDER -> "BRAKE"
                 ControlType.CLUTCH_SLIDER -> "CLUTCH"
-                ControlType.JOYSTICK -> "LOOK"
                 ControlType.BUTTON -> "A"
                 else -> ""
             }
