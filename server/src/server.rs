@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::f1::{self, F1_PORT};
 use crate::engineinfo::{self, EngineInfo, ENGINEINFO_PORT};
 use crate::motionsim;
 use crate::outgauge;
@@ -339,16 +340,18 @@ pub fn local_ipv4() -> Option<Ipv4Addr> {
 pub enum Game {
     BeamNg,
     TruckSim, // ETS2 / ATS
+    F1_24,
     Wrc10,
 }
 
 impl Game {
-    pub const ALL: [Game; 3] = [Game::BeamNg, Game::TruckSim, Game::Wrc10];
+    pub const ALL: [Game; 4] = [Game::BeamNg, Game::TruckSim, Game::F1_24, Game::Wrc10];
 
     pub fn name(self) -> &'static str {
         match self {
             Game::BeamNg => "BeamNG.drive",
             Game::TruckSim => "Euro / American Truck Sim",
+            Game::F1_24 => "F1 24",
             Game::Wrc10 => "WRC 10",
         }
     }
@@ -363,6 +366,10 @@ impl Game {
             Game::TruckSim => {
                 "Drop the scs-sdk-plugin DLL into the game's bin\\win_x64\\plugins folder. \
                  (Dashboard telemetry coming soon; the wheel already works.)"
+            }
+            Game::F1_24 => {
+                "Settings > Telemetry Settings: UDP Telemetry On, IP 127.0.0.1, port 20777, \
+                 format 2024. Then bind the controller under Controls - either device works."
             }
             Game::Wrc10 => {
                 "Dashboard telemetry coming soon; steering and pedals already work via the \
@@ -537,6 +544,14 @@ pub fn run(shared: Arc<Shared>, stop: Arc<AtomicBool>, game: Game, device: Devic
                 let stop = Arc::clone(&stop);
                 let link = Arc::clone(&link);
                 std::thread::spawn(move || truck_telemetry(shared, stop, link))
+            });
+        }
+        Game::F1_24 => {
+            telem.push({
+                let shared = Arc::clone(&shared);
+                let stop = Arc::clone(&stop);
+                let link = Arc::clone(&link);
+                std::thread::spawn(move || f1_telemetry(shared, stop, link))
             });
         }
         Game::Wrc10 => {
@@ -780,6 +795,70 @@ fn truck_telemetry(shared: Arc<Shared>, stop: Arc<AtomicBool>, link: Arc<PhoneLi
         link.send(&packet);
         shared.send_mirror(&tx, &packet);
         std::thread::sleep(Duration::from_millis(16));
+    }
+}
+
+/// Reads F1 24's UDP telemetry (see [f1]) and relays it to the phone. The game
+/// sends the engine's exact rpm range, so there's nothing to learn.
+fn f1_telemetry(shared: Arc<Shared>, stop: Arc<AtomicBool>, link: Arc<PhoneLink>) {
+    let sock = match UdpSocket::bind(("0.0.0.0", F1_PORT)) {
+        Ok(s) => s,
+        Err(e) => {
+            shared.log(format!("Could not bind F1 telemetry port {F1_PORT}: {e}"));
+            return;
+        }
+    };
+    if sock.set_read_timeout(Some(INPUT_TIMEOUT)).is_err() {
+        return;
+    }
+    let tx = match UdpSocket::bind(("0.0.0.0", 0)) {
+        Ok(s) => s,
+        Err(e) => {
+            shared.log(format!("Could not open telemetry sender socket: {e}"));
+            return;
+        }
+    };
+    shared.log(format!("Listening for F1 24 telemetry on UDP :{F1_PORT}"));
+
+    // Big enough for any F1 packet (the largest is ~1.5 KB).
+    let mut buf = [0u8; 2048];
+    let mut status: Option<f1::CarStatus> = None;
+    let mut announced = false;
+    let mut warned_format = false;
+    while !stop.load(Ordering::Relaxed) {
+        let Ok((n, _)) = sock.recv_from(&mut buf) else { continue };
+        let t = match f1::parse(&buf[..n]) {
+            Ok(f1::Packet::Status(s)) => {
+                if status.map(|o| o.max_rpm) != Some(s.max_rpm) {
+                    shared.log(format!("F1 24: rev range {:.0}-{:.0} rpm.", s.idle_rpm, s.max_rpm));
+                }
+                status = Some(s);
+                continue;
+            }
+            Ok(f1::Packet::Telemetry(t)) => t,
+            Err(f1::Skip::Format(v)) => {
+                if !warned_format {
+                    shared.log(format!(
+                        "F1 telemetry arrives in format {v}; set UDP Format to 2024 in the game."
+                    ));
+                    warned_format = true;
+                }
+                continue;
+            }
+            Err(_) => continue,
+        };
+        if !announced {
+            shared.log("F1 24: data flowing from the game.");
+            announced = true;
+        }
+        let tel = f1::to_phone(&t, status.as_ref());
+        shared.set_status(|s| {
+            s.beamng = true;
+            s.last = Some((tel.speed_kmh, tel.rpm, tel.gear));
+        });
+        let packet = tel.encode();
+        link.send(&packet);
+        shared.send_mirror(&tx, &packet);
     }
 }
 

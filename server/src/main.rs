@@ -10,6 +10,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod engineinfo;
+mod f1;
 mod freetrack;
 mod gui;
 mod headtracker;

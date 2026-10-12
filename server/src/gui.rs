@@ -350,6 +350,9 @@ impl eframe::App for App {
                     Game::TruckSim => {
                         dot_row(ui, "Truck telemetry (SCS plugin)", status.beamng);
                     }
+                    Game::F1_24 => {
+                        dot_row(ui, "F1 24 telemetry (UDP 20777)", status.beamng);
+                    }
                     Game::Wrc10 => {
                         dot_row(ui, "Telemetry (not wired for WRC 10 yet)", false);
                     }

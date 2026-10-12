@@ -22,6 +22,7 @@ with more games on the way.
 │  • OutGauge  UDP :4444 -> parsed -> phone dash    │
 │  • MotionSim UDP :4445 -> slide + crash -> wheel  │
 │  • DotDash   UDP :4446 -> real rev range -> tach  │
+│  • F1 24     UDP :20777 -> phone dash             │
 │  • same telemetry -> PicoPanel  UDP :5051        │
 └──────────────────────────────────────────────────┘
 ```
@@ -191,6 +192,23 @@ copies it) and `beamng/dotdash.zip` is the DotDash build the launcher embeds.
 `python tools/update_dotdash.py` refreshes that zip, from `../beamng-dotdash`
 if it's checked out or else from DotDash's latest release, and refuses one
 without the protocol, with a different copy of it, or with font files in it.
+
+## F1 24 setup
+
+Pick **F1 24** in the launcher's GAME card. F1 24 has telemetry built in, so
+there's no mod: in the game, **Settings -> Telemetry Settings**, set
+**UDP Telemetry** On, IP `127.0.0.1`, port `20777`, **UDP Format** `2024`, and
+**UDP Send Rate** 60 Hz for a smooth tach.
+
+The phone gets speed, rpm, gear, throttle and brake, engine temperature,
+fuel, the pit limiter, and the shift light when the wheel's rev lights are
+full. The rpm range is the engine's own (F1 sends max and idle rpm), so the
+tach is right from the first lap, with nothing to learn. If the game sends
+another format, the log says so.
+
+Either controller works: the **vJoy wheel** (bind steering, throttle and brake
+under Controls -> Calibration / Edit controls) or the **Xbox pad**, which F1 24
+recognises on its own.
 
 ## Android app
 
