@@ -171,6 +171,9 @@ and an overrev can't stretch it.
   Restart BeamNG once to load it. **Remove** deletes that folder and nothing else.
 - Or by hand: drop `CorsaConnect-BeamNG-mod.zip` from the release into your
   BeamNG `mods` folder.
+- Or install [DotDash](https://github.com/Tudor077/beamng-dotdash), the
+  dashboard UI apps: it carries the same protocol, so it's one mod for both.
+  The card then says **Included in dotdash** and offers no install.
 - It runs under **Options -> Other -> Protocols -> Other protocols**, which is
   on by default. There's no port to set.
 

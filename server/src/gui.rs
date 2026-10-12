@@ -504,11 +504,12 @@ impl App {
             });
             ui.add_space(6.0);
 
-            let (text, color) = match self.beam_mod {
-                ModState::Installed => ("Installed", GREEN),
-                ModState::Outdated => ("Installed, older version", AMBER),
-                ModState::Missing => ("Not installed - the redline is learned instead", MUTED),
-                ModState::NoBeamNg => ("BeamNG's user folder not found", MUTED),
+            let (text, color) = match &self.beam_mod {
+                ModState::Installed => ("Installed".to_string(), GREEN),
+                ModState::Outdated => ("Installed, older version".to_string(), AMBER),
+                ModState::Bundled(name) => (format!("Included in {name}"), GREEN),
+                ModState::Missing => ("Not installed - the redline is learned instead".to_string(), MUTED),
+                ModState::NoBeamNg => ("BeamNG's user folder not found".to_string(), MUTED),
             };
             ui.label(RichText::new(text).size(13.0).color(color));
 

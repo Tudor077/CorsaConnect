@@ -831,13 +831,13 @@ fn motion_listener(shared: Arc<Shared>, stop: Arc<AtomicBool>) {
 /// Listens for the CorsaConnect BeamNG mod (see [engineinfo]) and keeps the
 /// latest rpm range for the telemetry relay.
 fn engine_listener(shared: Arc<Shared>, stop: Arc<AtomicBool>) {
-    let sock = match UdpSocket::bind(("0.0.0.0", ENGINEINFO_PORT)) {
-        Ok(s) => s,
-        Err(e) => {
-            shared.log(format!("Could not bind engine info port {ENGINEINFO_PORT}: {e}"));
-            return;
-        }
-    };
+    match UdpSocket::bind(("0.0.0.0", ENGINEINFO_PORT)) {
+        Ok(sock) => engine_listen_on(sock, shared, stop),
+        Err(e) => shared.log(format!("Could not bind engine info port {ENGINEINFO_PORT}: {e}")),
+    }
+}
+
+fn engine_listen_on(sock: UdpSocket, shared: Arc<Shared>, stop: Arc<AtomicBool>) {
     if sock.set_read_timeout(Some(INPUT_TIMEOUT)).is_err() {
         return;
     }
@@ -920,9 +920,12 @@ mod tests {
     fn mod_packets_reach_the_relay() {
         let shared = Shared::new();
         let stop = Arc::new(AtomicBool::new(false));
+        // Its own port, so a launcher running on this PC doesn't get in the way.
+        let sock = UdpSocket::bind(("127.0.0.1", 0)).unwrap();
+        let port = sock.local_addr().unwrap().port();
         let listener = {
             let (shared, stop) = (Arc::clone(&shared), Arc::clone(&stop));
-            std::thread::spawn(move || engine_listener(shared, stop))
+            std::thread::spawn(move || engine_listen_on(sock, shared, stop))
         };
         let mut pkt = vec![b'C', b'E', 1, 1];
         pkt.extend_from_slice(&850.0f32.to_le_bytes());
@@ -930,7 +933,7 @@ mod tests {
         let tx = UdpSocket::bind(("127.0.0.1", 0)).unwrap();
         let deadline = Instant::now() + Duration::from_secs(3);
         while shared.engine_info().is_none() && Instant::now() < deadline {
-            tx.send_to(&pkt, ("127.0.0.1", ENGINEINFO_PORT)).unwrap();
+            tx.send_to(&pkt, ("127.0.0.1", port)).unwrap();
             std::thread::sleep(Duration::from_millis(50));
         }
         assert_eq!(shared.engine_info().map(|e| e.max_rpm), Some(7200.0));
