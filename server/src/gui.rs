@@ -345,7 +345,7 @@ impl eframe::App for App {
                     Game::BeamNg => {
                         dot_row(ui, "BeamNG telemetry", status.beamng);
                         dot_row(ui, "MotionSim (slide + crash)", status.motion);
-                        dot_row(ui, "Rev range (CorsaConnect mod)", status.engine);
+                        dot_row(ui, "Rev range (DotDash)", status.engine);
                     }
                     Game::TruckSim => {
                         dot_row(ui, "Truck telemetry (SCS plugin)", status.beamng);
@@ -368,7 +368,7 @@ impl eframe::App for App {
 
             ui.add_space(12.0);
 
-            // --- The BeamNG mod that sends the real rev range ---
+            // --- DotDash: BeamNG UI apps that also send the real rev range ---
             if self.game == Game::BeamNg {
                 self.beam_mod_card(ui);
                 ui.add_space(12.0);
@@ -489,15 +489,17 @@ impl App {
         });
     }
 
-    /// The BEAMNG MOD card. OutGauge has no rpm range, so without the mod the
-    /// tach learns the redline by watching the engine; with it, the range is
-    /// the car's own from the first second. See [crate::engineinfo].
+    /// The DOTDASH card. OutGauge has no rpm range, so without DotDash the
+    /// tach learns the redline by watching the engine. DotDash carries our
+    /// protocol, so with it the range is the car's own from the first second,
+    /// and its dashboard apps come along. See [crate::engineinfo].
     fn beam_mod_card(&mut self, ui: &mut egui::Ui) {
+        let version = engineinfo::dotdash_version();
         frame_card(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label(RichText::new("BEAMNG MOD").size(12.0).color(MUTED));
+                ui.label(RichText::new("DOTDASH").size(12.0).color(MUTED));
                 ui.label(
-                    RichText::new("the car's real rev range \u{2192} tach")
+                    RichText::new("BeamNG UI apps + the car's real rev range \u{2192} tach")
                         .size(11.0)
                         .color(MUTED),
                 );
@@ -505,9 +507,15 @@ impl App {
             ui.add_space(6.0);
 
             let (text, color) = match &self.beam_mod {
-                ModState::Installed => ("Installed".to_string(), GREEN),
-                ModState::Outdated => ("Installed, older version".to_string(), AMBER),
-                ModState::Bundled(name) => (format!("Included in {name}"), GREEN),
+                ModState::Ours { current: true } => (format!("DotDash {version} installed"), GREEN),
+                ModState::Ours { current: false } => ("Installed, older version".to_string(), AMBER),
+                ModState::Elsewhere { name, protocol: true } => {
+                    (format!("DotDash installed ({name})"), GREEN)
+                }
+                ModState::Elsewhere { name, protocol: false } => (
+                    format!("DotDash ({name}) is older than 1.1: no rev range. Update it where it came from."),
+                    AMBER,
+                ),
                 ModState::Missing => ("Not installed - the redline is learned instead".to_string(), MUTED),
                 ModState::NoBeamNg => ("BeamNG's user folder not found".to_string(), MUTED),
             };
@@ -516,29 +524,30 @@ impl App {
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 let install = match self.beam_mod {
-                    ModState::Outdated => Some("Update mod"),
-                    ModState::Missing => Some("Install mod"),
+                    ModState::Ours { current: false } => Some(format!("Update to {version}")),
+                    ModState::Missing => Some(format!("Install DotDash {version}")),
                     _ => None,
                 };
                 if let Some(label) = install {
                     if ui
                         .button(label)
-                        .on_hover_text("Writes one Lua file into BeamNG's mods\\unpacked\\corsaconnect")
+                        .on_hover_text("Puts dotdash.zip in BeamNG's mods folder")
                         .clicked()
                     {
                         self.beam_mod_note = Some(match engineinfo::install_mod() {
                             Ok(_) => {
-                                self.shared.log("Installed the CorsaConnect BeamNG mod.");
-                                ("Done. Restart BeamNG to load it.".to_string(), false)
+                                self.shared.log(format!("Installed DotDash {version} into BeamNG."));
+                                (
+                                    "Done. Restart BeamNG, then UI Apps -> search \"Dot\".".to_string(),
+                                    false,
+                                )
                             }
                             Err(e) => (e, true),
                         });
                         self.beam_mod = engineinfo::mod_state();
                     }
                 }
-                if matches!(self.beam_mod, ModState::Installed | ModState::Outdated)
-                    && ui.button("Remove").clicked()
-                {
+                if matches!(self.beam_mod, ModState::Ours { .. }) && ui.button("Remove").clicked() {
                     self.beam_mod_note = Some(match engineinfo::remove_mod() {
                         Ok(()) => ("Removed. Restart BeamNG to unload it.".to_string(), false),
                         Err(e) => (e, true),
@@ -549,8 +558,8 @@ impl App {
             let (note, color) = match &self.beam_mod_note {
                 Some((msg, err)) => (msg.as_str(), if *err { AMBER } else { MUTED }),
                 None => (
-                    "Sends idle rpm and the rev limiter to UDP 4446. Needs \"Other protocols\" \
-                     on in Options > Other > Protocols (it is by default).",
+                    "Its protocol sends idle rpm and the rev limiter to UDP 4446. Needs \
+                     \"Other protocols\" on in Options > Other > Protocols (it is by default).",
                     MUTED,
                 ),
             };

@@ -851,7 +851,7 @@ fn engine_listen_on(sock: UdpSocket, shared: Arc<Shared>, stop: Arc<AtomicBool>)
         *shared.engine.lock().unwrap() = Some((info, Instant::now()));
         if last != Some(info) {
             shared.log(format!(
-                "BeamNG mod: rev range {:.0}-{:.0} rpm{}.",
+                "DotDash: rev range {:.0}-{:.0} rpm{}.",
                 info.idle_rpm,
                 info.max_rpm,
                 if info.rev_limiter { "" } else { " (no rev limiter)" }

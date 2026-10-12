@@ -6,12 +6,13 @@
 //! BeamNG's own tacho apps use: idle rpm and the rev limiter, a few times a
 //! second, to UDP 4446. 12 bytes, little-endian, header "CE" + version 1.
 //!
-//! This file also installs that mod: it's one Lua file, so it's embedded in
-//! the exe and written into BeamNG's unpacked mods folder on request. Other
-//! mods may carry the same file (DotDash does), and then nothing needs
-//! installing - see [ModState::Bundled].
+//! The protocol travels inside DotDash, the dashboard UI apps for BeamNG
+//! (github.com/Tudor077/beamng-dotdash). CorsaConnect carries DotDash's
+//! public zip (`beamng/dotdash.zip`, refreshed by `tools/update_dotdash.py`)
+//! and installs it on request: one mod gives you both the apps on screen and
+//! the rev range for the phone.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Port the mod sends to (next to OutGauge 4444 and MotionSim 4445).
 pub const ENGINEINFO_PORT: u16 = 4446;
@@ -36,9 +37,21 @@ pub fn parse(buf: &[u8]) -> Option<EngineInfo> {
     (info.max_rpm.is_finite() && info.max_rpm > 500.0).then_some(info)
 }
 
-/// The mod, exactly as it is in the repo.
+/// The protocol as it is in the repo. DotDash carries a copy of this file.
+#[cfg(test)]
 const MOD_LUA: &str = include_str!("../../beamng/lua/vehicle/protocols/corsaconnect.lua");
-const MOD_NAME: &str = "corsaconnect";
+
+/// DotDash's public release zip, with the protocol inside.
+const DOTDASH_ZIP: &[u8] = include_bytes!("../../beamng/dotdash.zip");
+/// What we call it in the mods folder.
+const DOTDASH_FILE: &str = "dotdash.zip";
+/// The protocol-only mod an earlier 0.7.0 build installed; replaced by DotDash.
+const LEGACY_DIR: &str = "corsaconnect";
+
+/// The protocol's path inside any mod, as BeamNG mounts it.
+const PROTOCOL_PATH: &str = "lua/vehicle/protocols/corsaconnect.lua";
+/// A file every DotDash has, protocol or not.
+const DOTDASH_MARK: &str = "ui/modules/apps/DotDash/app.json";
 
 /// BeamNG's user mods folder (`%LOCALAPPDATA%\BeamNG\BeamNG.drive\current\mods`),
 /// if BeamNG has ever run on this PC.
@@ -48,95 +61,102 @@ fn mods_dir() -> Option<PathBuf> {
     dir.is_dir().then_some(dir)
 }
 
-fn mod_file() -> Option<PathBuf> {
-    Some(
-        mods_dir()?
-            .join("unpacked")
-            .join(MOD_NAME)
-            .join("lua")
-            .join("vehicle")
-            .join("protocols")
-            .join("corsaconnect.lua"),
-    )
-}
-
-/// Where the mod stands on this PC.
+/// Where DotDash stands on this PC.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ModState {
     /// No BeamNG user folder found.
     NoBeamNg,
     Missing,
-    /// Installed, but not the version this exe carries.
-    Outdated,
-    Installed,
-    /// Another mod carries the protocol (named here), e.g. DotDash.
-    Bundled(String),
+    /// The copy we installed; `current` when it's the one this exe carries.
+    Ours { current: bool },
+    /// DotDash put there some other way (the Repository, or built from
+    /// source). We leave it alone; without the protocol it's a version
+    /// from before 1.1 and needs updating where it came from.
+    Elsewhere { name: String, protocol: bool },
 }
 
-/// The protocol's path inside any mod, as BeamNG mounts it.
-const PROTOCOL_PATH: &str = "lua/vehicle/protocols/corsaconnect.lua";
-
 pub fn mod_state() -> ModState {
-    let Some(file) = mod_file() else { return ModState::NoBeamNg };
-    match std::fs::read_to_string(&file) {
-        Ok(s) if s.replace("\r\n", "\n") == MOD_LUA.replace("\r\n", "\n") => ModState::Installed,
-        Ok(_) => ModState::Outdated,
-        Err(_) => match mods_dir().and_then(|d| bundled_in(&d)) {
-            Some(name) => ModState::Bundled(name),
-            None => ModState::Missing,
-        },
+    match mods_dir() {
+        None => ModState::NoBeamNg,
+        Some(mods) => state_in(&mods),
     }
 }
 
-/// The name of another mod that carries the protocol, unpacked or zipped.
-fn bundled_in(mods: &std::path::Path) -> Option<String> {
+fn state_in(mods: &Path) -> ModState {
+    if let Ok(bytes) = std::fs::read(mods.join(DOTDASH_FILE)) {
+        return ModState::Ours { current: bytes == DOTDASH_ZIP };
+    }
     if let Ok(unpacked) = std::fs::read_dir(mods.join("unpacked")) {
-        for dir in unpacked.flatten() {
-            if dir.file_name() != MOD_NAME && dir.path().join(PROTOCOL_PATH).is_file() {
-                return Some(dir.file_name().to_string_lossy().into_owned());
+        for dir in unpacked.flatten().map(|e| e.path()) {
+            if dir.join(DOTDASH_MARK).is_file() {
+                return ModState::Elsewhere {
+                    name: dir.file_name().unwrap().to_string_lossy().into_owned(),
+                    protocol: dir.join(PROTOCOL_PATH).is_file(),
+                };
             }
         }
     }
     for folder in [mods.to_path_buf(), mods.join("repo")] {
         let Ok(entries) = std::fs::read_dir(folder) else { continue };
         for zip in entries.flatten().map(|e| e.path()) {
-            if zip.extension().is_some_and(|x| x.eq_ignore_ascii_case("zip")) && zip_has_protocol(&zip) {
-                return Some(zip.file_stem()?.to_string_lossy().into_owned());
+            if !zip.extension().is_some_and(|x| x.eq_ignore_ascii_case("zip")) {
+                continue;
+            }
+            let names = zip_names(&zip);
+            if contains(&names, DOTDASH_MARK) {
+                return ModState::Elsewhere {
+                    name: zip.file_stem().unwrap().to_string_lossy().into_owned(),
+                    protocol: contains(&names, PROTOCOL_PATH),
+                };
             }
         }
     }
-    None
+    ModState::Missing
 }
 
-/// Whether a zip lists the protocol. File names sit uncompressed in the
-/// central directory at the end, so the tail is enough - no unzipping. Car
-/// mods run to hundreds of MB and never carry it, so big zips are skipped.
-fn zip_has_protocol(zip: &std::path::Path) -> bool {
+/// The tail of a zip, where its central directory lists every file name
+/// uncompressed - enough to see what's inside without unzipping. Car mods run
+/// to hundreds of MB and are never DotDash, so big zips aren't read at all.
+fn zip_names(zip: &Path) -> Vec<u8> {
     use std::io::{Read, Seek, SeekFrom};
-    let Ok(mut f) = std::fs::File::open(zip) else { return false };
+    let Ok(mut f) = std::fs::File::open(zip) else { return Vec::new() };
     let len = f.metadata().map(|m| m.len()).unwrap_or(0);
     if len > 20 << 20 {
-        return false;
+        return Vec::new();
     }
     let tail = len.min(1 << 20);
     let mut buf = vec![0; tail as usize];
-    f.seek(SeekFrom::End(-(tail as i64))).is_ok()
-        && f.read_exact(&mut buf).is_ok()
-        && buf.windows(PROTOCOL_PATH.len()).any(|w| w == PROTOCOL_PATH.as_bytes())
+    if f.seek(SeekFrom::End(-(tail as i64))).is_err() || f.read_exact(&mut buf).is_err() {
+        return Vec::new();
+    }
+    buf
 }
 
-/// Write (or update) the mod. BeamNG picks it up on its next start.
+fn contains(hay: &[u8], name: &str) -> bool {
+    hay.windows(name.len()).any(|w| w == name.as_bytes())
+}
+
+/// Put DotDash in the mods folder (or update it). BeamNG loads it on its next
+/// start. Also clears out the protocol-only mod an earlier build installed,
+/// which would otherwise be loaded twice.
 pub fn install_mod() -> Result<PathBuf, String> {
-    let file = mod_file().ok_or("BeamNG's user folder wasn't found. Start BeamNG once first.")?;
-    std::fs::create_dir_all(file.parent().unwrap()).map_err(|e| e.to_string())?;
-    std::fs::write(&file, MOD_LUA).map_err(|e| e.to_string())?;
+    let mods = mods_dir().ok_or("BeamNG's user folder wasn't found. Start BeamNG once first.")?;
+    let file = mods.join(DOTDASH_FILE);
+    std::fs::write(&file, DOTDASH_ZIP).map_err(|e| e.to_string())?;
+    let _ = std::fs::remove_dir_all(mods.join("unpacked").join(LEGACY_DIR));
     Ok(file)
 }
 
-/// Delete the mod's folder, and only that.
+/// Delete the DotDash zip we installed, and only that.
 pub fn remove_mod() -> Result<(), String> {
-    let dir = mods_dir().ok_or("BeamNG's user folder wasn't found.")?.join("unpacked").join(MOD_NAME);
-    std::fs::remove_dir_all(dir).map_err(|e| e.to_string())
+    let mods = mods_dir().ok_or("BeamNG's user folder wasn't found.")?;
+    std::fs::remove_file(mods.join(DOTDASH_FILE)).map_err(|e| e.to_string())
+}
+
+/// The DotDash version this exe carries. The zip's own info.json is
+/// compressed, so tools/update_dotdash.py writes it down next to the zip.
+pub fn dotdash_version() -> &'static str {
+    include_str!("../../beamng/dotdash.version").trim()
 }
 
 #[cfg(test)]
@@ -165,28 +185,50 @@ mod tests {
         assert!(parse(&v2).is_none());
     }
 
-    /// DotDash ships the protocol: found unpacked or zipped, by its own name.
-    #[test]
-    fn finds_the_protocol_inside_another_mod() {
-        let mods = std::env::temp_dir().join(format!("cc_mods_{}", std::process::id()));
+    fn scratch(tag: &str) -> PathBuf {
+        let mods = std::env::temp_dir().join(format!("cc_mods_{tag}_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&mods);
         std::fs::create_dir_all(mods.join("unpacked").join("ets2_link")).unwrap();
         std::fs::create_dir_all(mods.join("repo")).unwrap();
-        assert_eq!(bundled_in(&mods), None);
+        mods
+    }
 
-        // Zipped, as the release / Repository download installs it.
-        let mut zip = b"PK\x03\x04 local headers...".to_vec();
-        zip.extend_from_slice(b"PK\x01\x02 central directory lua/vehicle/protocols/corsaconnect.lua");
-        std::fs::write(mods.join("repo").join("dotdash.zip"), &zip).unwrap();
-        assert_eq!(bundled_in(&mods).as_deref(), Some("dotdash"));
-        std::fs::remove_file(mods.join("repo").join("dotdash.zip")).unwrap();
+    /// Ours is told apart from a DotDash that came from somewhere else.
+    #[test]
+    fn tells_where_dotdash_came_from() {
+        let mods = scratch("where");
+        assert_eq!(state_in(&mods), ModState::Missing);
 
-        // Unpacked, as DotDash's build.py installs it.
-        let lua = mods.join("unpacked").join("dotdash").join(PROTOCOL_PATH);
-        std::fs::create_dir_all(lua.parent().unwrap()).unwrap();
-        std::fs::write(&lua, MOD_LUA).unwrap();
-        assert_eq!(bundled_in(&mods).as_deref(), Some("dotdash"));
+        // From the Repository, 1.0: no protocol yet.
+        let old = mods.join("repo").join("dotdash_repo.zip");
+        std::fs::write(&old, format!("PK\x03\x04 ... PK\x01\x02 {DOTDASH_MARK}")).unwrap();
+        assert_eq!(state_in(&mods), ModState::Elsewhere { name: "dotdash_repo".into(), protocol: false });
+        // 1.1 has it.
+        std::fs::write(&old, format!("PK\x03\x04 ... PK\x01\x02 {DOTDASH_MARK} {PROTOCOL_PATH}")).unwrap();
+        assert_eq!(state_in(&mods), ModState::Elsewhere { name: "dotdash_repo".into(), protocol: true });
+        std::fs::remove_file(&old).unwrap();
+
+        // Built from source, unpacked.
+        let dev = mods.join("unpacked").join("dotdash");
+        std::fs::create_dir_all(dev.join("ui/modules/apps/DotDash")).unwrap();
+        std::fs::write(dev.join(DOTDASH_MARK), "{}").unwrap();
+        assert_eq!(state_in(&mods), ModState::Elsewhere { name: "dotdash".into(), protocol: false });
+        std::fs::remove_dir_all(&dev).unwrap();
+
+        // Ours, current and then stale.
+        std::fs::write(mods.join(DOTDASH_FILE), DOTDASH_ZIP).unwrap();
+        assert_eq!(state_in(&mods), ModState::Ours { current: true });
+        std::fs::write(mods.join(DOTDASH_FILE), b"an older zip").unwrap();
+        assert_eq!(state_in(&mods), ModState::Ours { current: false });
         std::fs::remove_dir_all(&mods).unwrap();
+    }
+
+    /// The zip we ship really is DotDash, with this exact protocol inside.
+    #[test]
+    fn the_shipped_zip_carries_the_protocol() {
+        assert!(contains(DOTDASH_ZIP, DOTDASH_MARK), "beamng/dotdash.zip isn't DotDash");
+        assert!(contains(DOTDASH_ZIP, PROTOCOL_PATH), "beamng/dotdash.zip has no protocol");
+        assert_eq!(&DOTDASH_ZIP[..2], b"PK");
     }
 
     /// The struct in the Lua file must stay the 12 bytes parsed above.

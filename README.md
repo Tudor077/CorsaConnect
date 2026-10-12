@@ -21,7 +21,7 @@ with more games on the way.
 │  • Webcam head tracking -> TrackIR -> any game    │
 │  • OutGauge  UDP :4444 -> parsed -> phone dash    │
 │  • MotionSim UDP :4445 -> slide + crash -> wheel  │
-│  • our mod   UDP :4446 -> real rev range -> tach  │
+│  • DotDash   UDP :4446 -> real rev range -> tach  │
 │  • same telemetry -> PicoPanel  UDP :5051        │
 └──────────────────────────────────────────────────┘
 ```
@@ -152,7 +152,7 @@ one), and the buttons in the order the launcher logs. In Xbox pad mode it's a
 360 pad: left stick X = steering, right trigger = throttle, left trigger =
 brake, LB/RB = shift down/up, A = handbrake.
 
-### The BeamNG mod (real rev range)
+### DotDash (BeamNG UI apps + the real rev range)
 
 OutGauge sends the rpm but not the car's rpm range, so on its own the server
 has to work out the redline: it watches for the rpm the engine *holds* at full
@@ -160,26 +160,37 @@ throttle, bouncing off the rev cut. That works, but only after you've hit the
 limiter once, and a plateau below it (top speed in top gear) can fool it until
 you go higher.
 
-The mod in [`beamng/`](beamng) removes the guesswork. It's a single Lua file
-that adds a protocol to BeamNG and sends the numbers BeamNG's own tacho apps
-use: idle rpm and the **rev limiter**, straight from the engine, to UDP 4446 a
-few times a second. With it the tach fits each car from the moment it spawns,
-and an overrev can't stretch it.
+CorsaConnect comes with [DotDash](https://github.com/Tudor077/beamng-dotdash),
+a set of minimal dashboard UI apps for BeamNG (tacho, boost, pedals, gears,
+G meter, a start/stop button with the drivetrain controls...). DotDash also
+carries CorsaConnect's protocol, which sends the numbers BeamNG's own tacho
+apps use: idle rpm and the **rev limiter**, straight from the engine, to UDP
+4446 a few times a second. So one mod gives you the apps on screen and a phone
+tach that fits each car from the moment it spawns, with no overrev able to
+stretch it.
 
-- **Install:** the launcher's **BEAMNG MOD** card has an **Install mod** button.
-  It writes the file to `%LOCALAPPDATA%\BeamNG\BeamNG.drive\current\mods\unpacked\corsaconnect\`.
-  Restart BeamNG once to load it. **Remove** deletes that folder and nothing else.
-- Or by hand: drop `CorsaConnect-BeamNG-mod.zip` from the release into your
-  BeamNG `mods` folder.
-- Or install [DotDash](https://github.com/Tudor077/beamng-dotdash), the
-  dashboard UI apps: it carries the same protocol, so it's one mod for both.
-  The card then says **Included in dotdash** and offers no install.
-- It runs under **Options -> Other -> Protocols -> Other protocols**, which is
-  on by default. There's no port to set.
+- **Install:** the launcher's **DOTDASH** card has an **Install DotDash**
+  button. It puts `dotdash.zip` into `%LOCALAPPDATA%\BeamNG\BeamNG.drive\current\mods\`.
+  Restart BeamNG, then open **UI Apps** and search **Dot**. **Update** appears
+  when the launcher carries a newer DotDash; **Remove** deletes that zip and
+  nothing else.
+- Already have DotDash from the BeamNG Repository? The card sees it and
+  leaves it alone. Version 1.1 or later has the protocol; for 1.0 the card
+  tells you to update it there.
+- Or by hand: drop `dotdash.zip` from the release into your BeamNG `mods`
+  folder.
+- The protocol runs under **Options -> Other -> Protocols -> Other
+  protocols**, which is on by default. There's no port to set.
 
-The launcher's **Rev range (CorsaConnect mod)** dot turns green while it's
-sending, and the log prints the range each time you change car. Without the
-mod everything still works; the redline is learned as above.
+The launcher's **Rev range (DotDash)** dot turns green while it's sending, and
+the log prints the range each time you change car. Without DotDash everything
+still works; the redline is learned as above.
+
+In this repo, `beamng/lua/` is the protocol itself (the original; DotDash
+copies it) and `beamng/dotdash.zip` is the DotDash build the launcher embeds.
+`python tools/update_dotdash.py` refreshes that zip, from `../beamng-dotdash`
+if it's checked out or else from DotDash's latest release, and refuses one
+without the protocol, with a different copy of it, or with font files in it.
 
 ## Android app
 
