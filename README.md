@@ -240,7 +240,7 @@ Little-endian throughout.
 
 - Input (phone -> server, 14 bytes, v7): `"CC"` + version + u16 buttons (raw XInput mask) + i16 steer + u8 throttle + u8 brake + u8 clutch + i16 joyX + i16 joyY, sent at ~100Hz
 - Telemetry (server -> phone, 32 bytes): `"CT"` + version + i8 gear + 7×f32
-- Beacon (server :5000 -> LAN broadcast and the phone, :5001, 1 Hz, 3 bytes): `"CD"` + version.
+- Beacon (server :5000 -> LAN broadcast and the phone, :5001, 1 Hz): `"CD"` + version + the PC's name (up to 32 ASCII bytes, so two PCs on one Wi-Fi can be told apart).
   The phone sends input from the same socket (:5001) it receives on.
 
 ## Custom HUD

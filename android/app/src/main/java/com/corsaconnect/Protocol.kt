@@ -16,9 +16,9 @@ import java.nio.ByteOrder
  * v6: telemetry adds the rest of OutGauge: `flags`, `showLights`, two text displays.
  * v7: input adds `joyX`/`joyY`, the free stick widget's two axes (spare vJoy axes).
  *
- * The PC also broadcasts a 3-byte beacon, `"CD"` + version, once a second. It
- * tells the app where the PC is, and it's what lets the PC skip the firewall
- * rule (see [NetworkService]).
+ * The PC also broadcasts a beacon, `"CD"` + version + its name, once a second.
+ * It tells the app where the PC is, and it's what lets the PC skip the
+ * firewall rule (see [NetworkService]).
  */
 object Protocol {
     const val INPUT_PORT = 5000
@@ -28,6 +28,11 @@ object Protocol {
     /** True if this is the PC's "I'm here" beacon (any version). */
     fun isBeacon(data: ByteArray, len: Int): Boolean =
         len >= 3 && data[0] == 'C'.code.toByte() && data[1] == 'D'.code.toByte()
+
+    /** The PC's name, which beacons carry after the version since 0.8.0
+     *  (empty from older PCs). Tells two PCs on one Wi-Fi apart. */
+    fun beaconName(data: ByteArray, len: Int): String =
+        if (len <= 3) "" else String(data, 3, len - 3, Charsets.US_ASCII).trim()
 
     /** Live controller state the phone streams to the server. */
     data class Input(

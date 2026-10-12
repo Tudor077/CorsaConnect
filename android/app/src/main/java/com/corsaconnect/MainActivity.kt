@@ -139,8 +139,10 @@ class MainActivity : ComponentActivity() {
     @Volatile private var hapticsActive = false
 
     private lateinit var network: NetworkService
-    /** The PC whose beacon we last heard, if any. */
-    private var foundPc by mutableStateOf<String?>(null)
+    /** A PC on this Wi-Fi, by IP: its name and when its beacon was last heard. */
+    private data class Pc(val name: String, val seenMs: Long)
+    /** Every PC whose beacon we've heard lately - at home there may be two. */
+    private val pcs = mutableStateMapOf<String, Pc>()
     private var latestTelemetry by mutableStateOf(Protocol.Telemetry())
 
     /** Sticky immersive fullscreen: no status/nav bars, no accidental taps on
@@ -203,7 +205,9 @@ class MainActivity : ComponentActivity() {
                 )
             },
             onTelemetry = { latestTelemetry = it },
-            onServerFound = { ip -> if (foundPc != ip) runOnUiThread { foundPc = ip } },
+            onServerFound = { ip, name ->
+                runOnUiThread { pcs[ip] = Pc(name, android.os.SystemClock.elapsedRealtime()) }
+            },
         ).also { it.open() }
 
         setContent {
@@ -359,18 +363,30 @@ class MainActivity : ComponentActivity() {
             store.save(config)
         }
 
-        // The PC announces itself on the LAN; fill its IP in for the user.
-        LaunchedEffect(foundPc) {
-            val pc = foundPc
-            if (pc != null && pc != config.serverIp) {
-                config = config.copy(serverIp = pc); store.save(config)
+        // Forget PCs that stopped announcing (closed, or Stop pressed).
+        LaunchedEffect(Unit) {
+            while (true) {
+                delay(1000)
+                val now = android.os.SystemClock.elapsedRealtime()
+                pcs.entries.removeAll { now - it.value.seenMs > 4000 }
+            }
+        }
+
+        // PCs announce themselves on the LAN. Fill the IP in for the user, but
+        // only when there's no doubt: the saved PC is gone and exactly one is
+        // here. With two PCs at home (yours and your brother's) the saved one
+        // stays put, and the start screen lists both to pick from.
+        val heard = pcs.keys.toSet()
+        LaunchedEffect(heard) {
+            if (config.serverIp !in heard && heard.size == 1) {
+                config = config.copy(serverIp = heard.first()); store.save(config)
             }
         }
 
         if (!connected) {
             StartScreen(
                 ip = config.serverIp,
-                found = foundPc != null && foundPc == config.serverIp,
+                pcs = pcs.entries.sortedBy { it.key }.map { it.key to it.value.name },
                 onIpChange = { config = config.copy(serverIp = it); store.save(config) },
                 onConnect = { connect(config.serverIp); connected = true },
             )
@@ -1117,7 +1133,8 @@ private fun Thumbstick(
 @Composable
 private fun StartScreen(
     ip: String,
-    found: Boolean,
+    /** PCs heard on this Wi-Fi: IP to name. */
+    pcs: List<Pair<String, String>>,
     onIpChange: (String) -> Unit,
     onConnect: () -> Unit,
 ) {
@@ -1141,6 +1158,21 @@ private fun StartScreen(
                 singleLine = true,
                 modifier = Modifier.width(240.dp),
             )
+            // More than one PC (or a name to show): tap the one you mean.
+            if (pcs.size > 1 || pcs.any { it.second.isNotEmpty() }) {
+                Row(
+                    Modifier.padding(top = 8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    pcs.forEach { (pcIp, name) ->
+                        FilterChip(
+                            selected = pcIp == ip,
+                            onClick = { onIpChange(pcIp) },
+                            label = { Text(if (name.isEmpty()) pcIp else "$name  $pcIp") },
+                        )
+                    }
+                }
+            }
             Spacer(Modifier.height(16.dp))
             Button(
                 onClick = onConnect,
@@ -1149,7 +1181,11 @@ private fun StartScreen(
                 Text("Connect", fontSize = 18.sp, fontWeight = FontWeight.Bold)
             }
             Text(
-                if (found) "PC found on this Wi-Fi." else "Searching for the PC… or type the IP shown on the launcher.",
+                when {
+                    pcs.size > 1 -> "${pcs.size} PCs on this Wi-Fi - pick yours."
+                    pcs.any { it.first == ip } -> "PC found on this Wi-Fi."
+                    else -> "Searching for the PC… or type the IP shown on the launcher."
+                },
                 color = Color(0xFF6A6A75),
                 fontSize = 12.sp,
                 modifier = Modifier.padding(top = 12.dp),

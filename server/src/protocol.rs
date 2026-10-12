@@ -2,8 +2,10 @@
 //!
 //! Phone -> server : `InputPacket` (14 bytes). Sent ~60Hz, drives the virtual pad.
 //! Server -> phone : `TelemetryPacket` (compact, parsed from BeamNG OutGauge).
-//! Server -> LAN   : beacon (`"CD"` + version), broadcast once a second so the
-//!                   phone can find the PC and the PC needs no firewall rule.
+//! Server -> LAN   : beacon (`"CD"` + version + PC name), broadcast once a
+//!                   second so the phone can find the PC and the PC needs no
+//!                   firewall rule. The name tells two PCs on one Wi-Fi apart;
+//!                   apps before 0.8.0 just ignore it.
 //!
 //! Everything is little-endian. We keep the input packet tiny and fixed-size so
 //! parsing is a few slice reads and latency stays minimal.
@@ -28,10 +30,21 @@ pub const PROTO_VERSION: u8 = 7;
 /// Magic prefix for the server's "I'm here" beacon.
 pub const BEACON_MAGIC: &[u8; 2] = b"CD";
 
-/// The beacon: magic + version, nothing else. The phone learns the PC's
-/// address from where it came from.
-pub fn beacon() -> [u8; 3] {
-    [BEACON_MAGIC[0], BEACON_MAGIC[1], PROTO_VERSION]
+/// The beacon: magic + version + this PC's name. The phone learns the PC's
+/// address from where it came from, and shows the name next to it.
+pub fn beacon() -> Vec<u8> {
+    let mut b = vec![BEACON_MAGIC[0], BEACON_MAGIC[1], PROTO_VERSION];
+    b.extend(pc_name().bytes().take(32));
+    b
+}
+
+/// The Windows computer name, ASCII only (it's shown on a phone, not parsed).
+fn pc_name() -> String {
+    std::env::var("COMPUTERNAME")
+        .unwrap_or_default()
+        .chars()
+        .filter(|c| c.is_ascii_graphic() || *c == ' ')
+        .collect()
 }
 
 /// Decoded controller input coming from the phone.

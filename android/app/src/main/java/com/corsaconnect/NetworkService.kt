@@ -30,7 +30,8 @@ class NetworkService(
     context: Context,
     private val inputProvider: () -> Protocol.Input,
     private val onTelemetry: (Protocol.Telemetry) -> Unit,
-    private val onServerFound: (String) -> Unit,
+    /** A PC's beacon arrived: its address and its name (may be empty). */
+    private val onServerFound: (ip: String, name: String) -> Unit,
 ) {
     // Some phones drop broadcast packets on Wi-Fi to save power unless an app
     // holds this lock; without it the beacon may never arrive.
@@ -118,7 +119,8 @@ class NetworkService(
                 val packet = DatagramPacket(buf, buf.size)
                 socket.receive(packet)
                 if (Protocol.isBeacon(packet.data, packet.length)) {
-                    packet.address?.hostAddress?.let(onServerFound)
+                    val name = Protocol.beaconName(packet.data, packet.length)
+                    packet.address?.hostAddress?.let { onServerFound(it, name) }
                 } else if (senderThread != null) {
                     Protocol.decodeTelemetry(packet.data, packet.length)?.let(onTelemetry)
                 }

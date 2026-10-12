@@ -24,6 +24,9 @@ const INPUT_PORT: u16 = 5000;
 const OUTGAUGE_PORT: u16 = 4444;
 /// Port BeamNG's MotionSim/OutSim protocol targets (slide + crash physics).
 const MOTIONSIM_PORT: u16 = 4445;
+/// How long the phone driving has to be silent before another phone may take
+/// over. Input arrives ~100 times a second, so this is a phone that's gone.
+const PHONE_TAKEOVER: Duration = Duration::from_secs(3);
 /// The BeamNG mod sends 4 times a second; this much silence means it stopped.
 const ENGINE_INFO_STALE: Duration = Duration::from_secs(2);
 /// How long a crash spike keeps fading after it lands.
@@ -589,13 +592,34 @@ fn input_loop(
     link: &Arc<PhoneLink>,
 ) -> std::io::Result<()> {
     let mut buf = [0u8; 64];
+    // The phone driving, and when it last sent. A second phone (a brother on
+    // the same Wi-Fi who picked the wrong PC) is ignored while the first one
+    // is still sending, rather than both steering one car.
+    let mut last_input = Instant::now();
+    let mut ignored: Option<IpAddr> = None;
     while !stop.load(Ordering::Relaxed) {
         match link.sock.recv_from(&mut buf) {
             Ok((n, src)) => {
                 if let Some(input) = InputPacket::parse(&buf[..n]) {
+                    let current = link.phone().map(|a| a.ip());
+                    let busy = current.is_some_and(|ip| ip != src.ip())
+                        && last_input.elapsed() < PHONE_TAKEOVER;
+                    if busy {
+                        if ignored != Some(src.ip()) {
+                            shared.log(format!(
+                                "Ignoring a second phone at {}: {} is driving.",
+                                src.ip(),
+                                current.unwrap()
+                            ));
+                            ignored = Some(src.ip());
+                        }
+                        continue;
+                    }
+                    last_input = Instant::now();
                     pad.update(&input);
                     let mut slot = link.addr.lock().unwrap();
                     if slot.map(|a| a.ip()) != Some(src.ip()) {
+                        ignored = None;
                         // Always the phone's :5001, not the packet's source port:
                         // older apps send from a random port but listen on 5001.
                         let addr = SocketAddr::new(src.ip(), PHONE_TELEMETRY_PORT);
