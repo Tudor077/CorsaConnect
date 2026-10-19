@@ -93,14 +93,36 @@ class NetworkService(
         t?.interrupt()
     }
 
+    /** Set while the app is in the background: send neutral input (no pedals,
+     *  no buttons, wheel centred) instead of whatever the screen last held, so
+     *  a car doesn't sit on the throttle while you're in another app. */
+    @Volatile var paused = false
+
     private fun senderLoop(serverIp: String) {
         val me = Thread.currentThread()
+        var address: InetAddress? = null
+        var failing = false
         try {
-            val address = InetAddress.getByName(serverIp)
-            val socket = socket ?: return
             while (running && senderThread === me) {
-                val bytes = Protocol.encodeInput(inputProvider())
-                socket.send(DatagramPacket(bytes, bytes.size, address, Protocol.INPUT_PORT))
+                val socket = socket ?: return
+                // A failed send must not end the loop. In the background Android
+                // cuts an app off the network after a while (battery saving), and
+                // send() throws; the receiver just waits and comes back on its
+                // own, so this has to as well - or telemetry returns and input
+                // never does.
+                try {
+                    val to = address ?: InetAddress.getByName(serverIp).also { address = it }
+                    val input = if (paused) Protocol.Input() else inputProvider()
+                    val bytes = Protocol.encodeInput(input)
+                    socket.send(DatagramPacket(bytes, bytes.size, to, Protocol.INPUT_PORT))
+                    if (failing) Log.i("CorsaConnect", "sending input again")
+                    failing = false
+                } catch (e: java.io.IOException) {
+                    if (!failing) Log.w("CorsaConnect", "send failed, retrying: ${e.message}")
+                    failing = true
+                    Thread.sleep(200)
+                    continue
+                }
                 // ~100Hz: the steering estimate updates at 200Hz, so sending at
                 // 60 was throwing away half of it for 10 bytes a packet.
                 Thread.sleep(10)

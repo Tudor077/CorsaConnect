@@ -217,8 +217,8 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    override fun onResume() { super.onResume(); steering.start() }
-    override fun onPause() { super.onPause(); steering.stop() }
+    override fun onResume() { super.onResume(); steering.start(); network.paused = false }
+    override fun onPause() { super.onPause(); steering.stop(); network.paused = true }
     override fun onDestroy() { super.onDestroy(); network.close(); haptics.stop() }
 
     private fun applyTuning(c: Config) {
