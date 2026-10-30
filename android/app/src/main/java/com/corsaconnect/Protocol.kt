@@ -79,6 +79,16 @@ object Protocol {
         val showLights: Int = 0,   // OutGauge dash lights lit (bitmask)
         val display1: String = "", // OutGauge text display 1
         val display2: String = "", // OutGauge text display 2
+        /** BeamNG's own gamepad vibration, when DotDash 1.3+ is in the game. */
+        val beamHaptics: BeamHaptics? = null,
+    )
+
+    /** What BeamNG's haptics.lua would send a gamepad, all 0..1. */
+    data class BeamHaptics(
+        val rumble: Float,    // main motor: bumps, kerbs, hits + tyre slip
+        val wheelspin: Float, // throttle trigger: driven wheels spinning
+        val lockup: Float,    // brake trigger: wheels locked under braking
+        val abs: Boolean,     // ABS working
     )
 
     /** Decode a telemetry packet, or null if it isn't one. */
@@ -104,9 +114,15 @@ object Protocol {
         val showLights = buf.int
         val display1 = readText(buf, 16)
         val display2 = readText(buf, 16)
+        // Since 0.8.0 the PC may append "HB" + flags + 3 f32: BeamNG's haptics.
+        val haptics = if (len >= 86 + 15 && data[86] == 'H'.code.toByte() && data[87] == 'B'.code.toByte()) {
+            buf.position(88)
+            val abs = (buf.get().toInt() and 1) != 0
+            BeamHaptics(rumble = buf.float, wheelspin = buf.float, lockup = buf.float, abs = abs)
+        } else null
         return Telemetry(
             gear, speed, rpm, fuel, turbo, engTemp, throttle, brake, slip, impact, maxRpm, redline,
-            flags, showLights, display1, display2,
+            flags, showLights, display1, display2, haptics,
         )
     }
 

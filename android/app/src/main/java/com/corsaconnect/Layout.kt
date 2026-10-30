@@ -167,6 +167,9 @@ data class Config(
     val hapticGrind: Boolean = true,     // buzz when shifting without clutch
     val hapticDrift: Boolean = true,     // rumble while sliding (real slip)
     val hapticCollision: Boolean = true, // jolt on impact
+    val hapticRoad: Boolean = true,      // bumps, kerbs, slides (BeamNG)
+    val hapticWheelspin: Boolean = true, // grain while wheels spin (BeamNG)
+    val hapticBrakes: Boolean = true,    // lock-up buzz + ABS chatter (BeamNG)
     val elements: List<Element>,
 ) {
     /** The vibration channels, shaped for [HapticsEngine]. */
@@ -178,6 +181,9 @@ data class Config(
         grind = hapticGrind,
         drift = hapticDrift,
         collision = hapticCollision,
+        road = hapticRoad,
+        wheelspin = hapticWheelspin,
+        brakes = hapticBrakes,
     )
 
     fun toJson(): JSONObject = JSONObject().apply {
@@ -202,6 +208,9 @@ data class Config(
         put("hapticGrind", hapticGrind)
         put("hapticDrift", hapticDrift)
         put("hapticCollision", hapticCollision)
+        put("hapticRoad", hapticRoad)
+        put("hapticWheelspin", hapticWheelspin)
+        put("hapticBrakes", hapticBrakes)
         put("elements", JSONArray().apply { elements.forEach { put(it.toJson()) } })
     }
 
@@ -233,6 +242,9 @@ data class Config(
                 hapticGrind = o.optBoolean("hapticGrind", true),
                 hapticDrift = o.optBoolean("hapticDrift", true),
                 hapticCollision = o.optBoolean("hapticCollision", true),
+                hapticRoad = o.optBoolean("hapticRoad", true),
+                hapticWheelspin = o.optBoolean("hapticWheelspin", true),
+                hapticBrakes = o.optBoolean("hapticBrakes", true),
                 elements = els,
             )
         }

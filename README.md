@@ -193,6 +193,29 @@ copies it) and `beamng/dotdash.zip` is the DotDash build the launcher embeds.
 if it's checked out or else from DotDash's latest release, and refuses one
 without the protocol, with a different copy of it, or with font files in it.
 
+### Vibration (force feedback on the phone)
+
+With DotDash 1.3+ in BeamNG the phone vibrates the way BeamNG vibrates a
+gamepad: the protocol runs the game's own `haptics.lua` logic and sends its
+channels - the road (bumps, kerbs, hits, tyre slip), wheelspin, wheels locking
+under braking, and ABS working. The phone gives each its own feel: taps that
+get harder and quicker on a rough road, a fine grain while the wheels spin, a
+near-continuous buzz while they lock, a 15 Hz chatter for ABS. On top of that,
+in every game: a knock on each gear change, a crunch when you shift without
+the clutch, the starter when the engine catches, and a slam on a crash
+(MotionSim). Each one has its own switch under Settings.
+
+How it's played matters as much as what: many phones' motors (the Nothing
+Phone included) have no amplitude control, so any level plays at full. The
+strength is therefore in the rhythm - how long the motor is on per beat - and
+each texture is one repeating waveform, started once and only replaced when it
+changes, rather than a vibrate() call per frame. The logic lives in
+`HapticMixer` (android/.../Haptics.kt), with unit tests in `android/app/src/test`.
+
+If the launcher logs "DotDash is older than 1.3", the rev range still works but
+the vibration doesn't: update DotDash, and check BeamNG's `mods\repo` folder for
+an older copy from the Repository, which takes precedence.
+
 ## F1 24 setup
 
 Pick **F1 24** in the launcher's GAME card. F1 24 has telemetry built in, so

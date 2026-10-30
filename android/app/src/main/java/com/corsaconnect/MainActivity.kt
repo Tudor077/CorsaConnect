@@ -144,6 +144,9 @@ class MainActivity : ComponentActivity() {
     /** Every PC whose beacon we've heard lately - at home there may be two. */
     private val pcs = mutableStateMapOf<String, Pc>()
     private var latestTelemetry by mutableStateOf(Protocol.Telemetry())
+    /** When the last telemetry packet arrived (elapsedRealtime ms). */
+    @Volatile private var telemetryAtMs = 0L
+    private val BEAM_HAPTICS_STALE_MS = 300L
 
     /** Sticky immersive fullscreen: no status/nav bars, no accidental taps on
      *  system UI; a swipe from the edge peeks them temporarily. */
@@ -186,6 +189,11 @@ class MainActivity : ComponentActivity() {
                 shiftHeld = shiftMask != 0 && (buttonsState and shiftMask) != 0,
                 slip = t.slip,
                 impact = t.impact,
+                // Only while it's live: the last packet before a pause must not
+                // keep rumbling.
+                beam = t.beamHaptics.takeIf {
+                    android.os.SystemClock.elapsedRealtime() - telemetryAtMs < BEAM_HAPTICS_STALE_MS
+                },
             )
         }
 
@@ -204,7 +212,10 @@ class MainActivity : ComponentActivity() {
                     joyY = axisShort(joyY),
                 )
             },
-            onTelemetry = { latestTelemetry = it },
+            onTelemetry = {
+                latestTelemetry = it
+                telemetryAtMs = android.os.SystemClock.elapsedRealtime()
+            },
             onServerFound = { ip, name ->
                 runOnUiThread { pcs[ip] = Pc(name, android.os.SystemClock.elapsedRealtime()) }
             },
@@ -1584,6 +1595,9 @@ private fun SettingsDialog(
                     SwitchRow("Grind (no clutch)", c.hapticGrind) { c = c.copy(hapticGrind = it) }
                     SwitchRow("Drift / slide", c.hapticDrift) { c = c.copy(hapticDrift = it) }
                     SwitchRow("Collision", c.hapticCollision) { c = c.copy(hapticCollision = it) }
+                    SwitchRow("Road: bumps, kerbs, slides (BeamNG)", c.hapticRoad) { c = c.copy(hapticRoad = it) }
+                    SwitchRow("Wheelspin (BeamNG)", c.hapticWheelspin) { c = c.copy(hapticWheelspin = it) }
+                    SwitchRow("Lock-up / ABS (BeamNG)", c.hapticBrakes) { c = c.copy(hapticBrakes = it) }
                 }
             }
         },

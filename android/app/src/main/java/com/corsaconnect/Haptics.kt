@@ -1,43 +1,276 @@
 package com.corsaconnect
 
 import android.content.Context
+import android.media.AudioAttributes
 import android.os.Build
+import android.os.SystemClock
+import android.os.VibrationAttributes
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
-import kotlin.random.Random
+
+/*
+ * Force feedback on the phone's one vibration motor.
+ *
+ * What it plays, and where it comes from:
+ *   * In BeamNG with DotDash 1.3+, the game's own gamepad vibration
+ *     (lua/vehicle/extensions/input/haptics.lua, sent by the CorsaConnect
+ *     protocol): the road - bumps, kerbs, hits and tyre slip - plus the two
+ *     trigger channels, wheelspin and lock-up, and ABS working.
+ *   * Without it, the phone's own estimate of a slide (from MotionSim).
+ *   * Events everywhere: a crash, a gear change, a crunch when shifting
+ *     without the clutch, the starter when the engine catches.
+ *
+ * How it plays them, from Android's haptics guidance:
+ *   * Continuous textures are repeating ON/OFF waveforms, started once and
+ *     replaced only when the texture actually changes. Calling vibrate() every
+ *     frame cancels the motor mid-spin over and over ("cancelled_superseded" in
+ *     dumpsys), which feels like a weak flat buzz.
+ *   * Many phones (the Nothing Phone included) have no amplitude control: any
+ *     level plays at 100%. Strength is then how long the motor is on per beat,
+ *     so every texture is a duty cycle, and the intensity slider scales it.
+ *   * Pulses must be >= ~50 ms apart to be felt as pulses; 5-10 ms gaps blur.
+ *   * Games are media, not touch feedback: USAGE_MEDIA / USAGE_GAME.
+ *
+ * [HapticMixer] decides what should be playing (plain Kotlin, unit-tested);
+ * [HapticsEngine] runs it on a thread and drives the motor.
+ */
+
+/** On/off for each channel, mirrored from [Config]. */
+data class HapticSettings(
+    val enabled: Boolean = true,
+    val intensity: Float = 1f,     // master 0..1
+    val ignition: Boolean = true,  // starter rattle when the engine catches
+    val shift: Boolean = true,     // knock on gear change
+    val grind: Boolean = true,     // crunch shifting without the clutch
+    val drift: Boolean = true,     // the phone's own slide estimate (MotionSim), when BeamNG sends nothing
+    val collision: Boolean = true, // jolt on impact
+    val road: Boolean = true,      // BeamNG: bumps, kerbs, hits, tyre slip
+    val wheelspin: Boolean = true, // BeamNG: driven wheels spinning
+    val brakes: Boolean = true,    // BeamNG: wheels locking, ABS working
+)
+
+/** Everything the mixer looks at, sampled each tick. */
+data class HapticState(
+    val active: Boolean,    // connected; telemetry expected to flow
+    val rpm: Float,
+    val gear: Int,
+    val clutch01: Float,    // clutch pedal 0..1 (phone-local); 1 = fully pressed
+    val throttle01: Float,  // throttle pedal 0..1 (phone-local)
+    val shiftHeld: Boolean, // any shift-flagged button currently pressed
+    val slip: Float,        // 0..1 sideways slide, from MotionSim
+    val impact: Float,      // 0..1 crash strength, decaying, from MotionSim
+    /** BeamNG's own gamepad vibration, while it's arriving; null otherwise. */
+    val beam: Protocol.BeamHaptics? = null,
+)
 
 /**
- * Turns the phone into a force-feedback wheel. A single background thread reads a
- * [HapticState] snapshot ~60Hz and drives the vibrator so the wheel "feels" the
- * car:
- *   * a repetitive engine pulse that speeds up with RPM (covers idle and revs),
- *   * heavy slow thuds while the starter cranks, until the engine catches,
- *   * a crisp tick on every gear change,
- *   * a long harsh buzz when you shift without holding the clutch (grinding),
- *   * a ragged rumble while sliding/drifting.
- *
- * Everything is driven by short [VibrationEffect.createOneShot] pulses on our own
- * timer, which is what gives the deliberately "pulsing" idle the user asked for.
+ * A vibration to play: OFF/ON durations in ms (Android's order, starting with
+ * an OFF gap), the level of each ON step 0..1, and where to loop from (-1 for
+ * a one-off). Levels are what a motor with amplitude control plays; a motor
+ * without it plays every ON step at full, so durations carry the strength too.
  */
-class HapticsEngine(context: Context, private val provider: () -> HapticState) {
+data class Pattern(val timings: LongArray, val levels: FloatArray, val repeat: Int) {
+    override fun equals(other: Any?) = other is Pattern && repeat == other.repeat &&
+        timings.contentEquals(other.timings) && levels.contentEquals(other.levels)
+    override fun hashCode() = timings.contentHashCode() * 31 + repeat
+    val durationMs: Long get() = timings.sum()
+}
 
-    private val vibrator: Vibrator? = resolveVibrator(context)?.takeIf { it.hasVibrator() }
-    private val hasAmplitude = vibrator?.hasAmplitudeControl() == true
+/** What the motor should do now. */
+sealed interface HapticCommand {
+    /** Start this pattern, replacing whatever plays. */
+    data class Play(val pattern: Pattern) : HapticCommand
+    /** Stop the motor. */
+    data object Stop : HapticCommand
+}
 
-    /** Live settings, mirrored from [Config]; safe to swap from the UI thread. */
-    @Volatile var settings = HapticSettings()
+/**
+ * Decides what should be playing. Feed it a [HapticState] each tick with the
+ * time; it answers with a command only when the motor has to change.
+ */
+class HapticMixer(private val amplitudeControl: Boolean) {
 
-    @Volatile private var running = false
-    private var thread: Thread? = null
+    /** The continuous textures, strongest wins. */
+    enum class Texture { ABS, LOCKUP, ROAD, WHEELSPIN, SLIDE }
 
-    // State carried between ticks.
+    private var settings = HapticSettings()
+
+    // Peak-held levels: a kerb is one or two frames of BeamNG's jerk, too short
+    // to feel, so each channel jumps up at once and fades at DECAY per second.
+    private var road = 0f
+    private var spin = 0f
+    private var lock = 0f
+    private var slide = 0f
+
     private var prevGear = Int.MIN_VALUE
     private var prevShift = false
     private var prevImpact = 0f
     private var prevRpm = 0f
-    private var pulseTimer = 0f
-    private var grindUntilMs = 0L
+    private var lastMs = -1L
+
+    /** The texture loop now playing (or due once an event ends), as (texture, step). */
+    private var playing: Pair<Texture, Int>? = null
+    private var eventUntilMs = 0L
+    /** When the wanted texture last differed from [playing]; changes must hold briefly. */
+    private var pendingSinceMs = -1L
+
+    fun update(s: HapticState, cfg: HapticSettings, nowMs: Long): HapticCommand? {
+        settings = cfg
+        val dt = if (lastMs < 0) 0f else ((nowMs - lastMs) / 1000f).coerceIn(0f, 0.1f)
+        lastMs = nowMs
+        if (!cfg.enabled || !s.active) {
+            remember(s)
+            road = 0f; spin = 0f; lock = 0f; slide = 0f
+            val wasPlaying = playing != null || nowMs < eventUntilMs
+            playing = null; eventUntilMs = 0L
+            return if (wasPlaying) HapticCommand.Stop else null
+        }
+
+        // --- Events: they cut in, and the texture comes back after. ---
+        event(s, cfg)?.let { p ->
+            remember(s)
+            eventUntilMs = nowMs + p.durationMs
+            playing = null // re-issue the texture when the event is over
+            return HapticCommand.Play(p)
+        }
+        remember(s)
+
+        // --- Continuous textures. ---
+        val beam = s.beam
+        val decay = DECAY * dt
+        road = hold(road, if (beam != null && cfg.road) beam.rumble else 0f, decay)
+        spin = hold(spin, if (beam != null && cfg.wheelspin) (beam.wheelspin * WHEELSPIN_GAIN).coerceAtMost(1f) else 0f, decay)
+        lock = hold(lock, if (beam != null && cfg.brakes) (beam.lockup * LOCKUP_GAIN).coerceAtMost(1f) else 0f, decay)
+        // The phone's own slide estimate only stands in when the game says nothing.
+        val slideIn = if (beam == null && cfg.drift) ((s.slip - SLIP_MIN) / (SLIP_FULL - SLIP_MIN)).coerceIn(0f, 1f) else 0f
+        slide = hold(slide, slideIn, decay)
+        val abs = beam != null && cfg.brakes && beam.abs
+
+        if (nowMs < eventUntilMs) return null
+        val want = wanted(abs)
+        if (want == playing) {
+            pendingSinceMs = -1L
+            return null
+        }
+        // Starting, stopping or going stronger is immediate; easing off waits
+        // a moment, so a level hovering on a step boundary doesn't restart the
+        // loop every frame.
+        val stronger = want != null && (playing == null || want.first.ordinal < playing!!.first.ordinal ||
+            (want.first == playing!!.first && want.second > playing!!.second))
+        if (!stronger && want != null) {
+            if (pendingSinceMs < 0) pendingSinceMs = nowMs
+            if (nowMs - pendingSinceMs < SETTLE_MS) return null
+        }
+        pendingSinceMs = -1L
+        playing = want
+        return if (want == null) HapticCommand.Stop else HapticCommand.Play(texture(want.first, want.second))
+    }
+
+    private fun remember(s: HapticState) {
+        prevGear = s.gear; prevShift = s.shiftHeld; prevImpact = s.impact; prevRpm = s.rpm
+    }
+
+    private fun hold(current: Float, input: Float, decay: Float): Float =
+        maxOf(input.coerceIn(0f, 1f), current - decay).coerceAtLeast(0f)
+
+    /** The texture to play, and its strength step 1..STEPS, or null for none. */
+    private fun wanted(abs: Boolean): Pair<Texture, Int>? {
+        if (abs) return Texture.ABS to STEPS
+        // Lock-up and the road are what you'd feel first; the spin is a fine
+        // grain under them. Ties go to the earlier one in [Texture].
+        val candidates = listOf(
+            Texture.LOCKUP to lock, Texture.ROAD to road, Texture.WHEELSPIN to spin * 0.8f, Texture.SLIDE to slide,
+        )
+        val (t, level) = candidates.maxByOrNull { it.second } ?: return null
+        if (level < FLOOR) return null
+        return t to step(if (t == Texture.WHEELSPIN) spin else level)
+    }
+
+    private fun step(level: Float) = (1 + (level * STEPS).toInt()).coerceIn(1, STEPS)
+
+    /** A repeating OFF/ON loop for a texture at a step. Strength is duty cycle
+     *  (and amplitude where the motor has it), all scaled by the intensity. */
+    fun texture(t: Texture, step: Int): Pattern {
+        val x = (step - 1f) / (STEPS - 1f) // 0..1
+        val (on, period, level) = when (t) {
+            // ~15 Hz, even and hard: ABS hammering the brakes.
+            Texture.ABS -> Triple(26f, 66f, 0.9f)
+            // Near-continuous: the tyre dragging.
+            Texture.LOCKUP -> Triple(lerp(45f, 85f, x), 95f, lerp(0.5f, 1f, x))
+            // The road: sparse taps when it's light, a pounding when it's rough.
+            Texture.ROAD -> Triple(lerp(14f, 42f, x), lerp(120f, 60f, x), lerp(0.3f, 1f, x))
+            // A fine quick grain, never too heavy.
+            Texture.WHEELSPIN -> Triple(lerp(9f, 16f, x), lerp(55f, 45f, x), lerp(0.25f, 0.6f, x))
+            Texture.SLIDE -> Triple(lerp(12f, 34f, x), lerp(110f, 65f, x), lerp(0.25f, 0.9f, x))
+        }
+        val scaledOn = scaleOn(on)
+        val off = (period - scaledOn).coerceAtLeast(MIN_GAP_MS.toFloat())
+        // [off, on] looping from index 0.
+        return Pattern(longArrayOf(off.toLong(), scaledOn.toLong()), floatArrayOf(0f, level), 0)
+    }
+
+    /** The intensity slider: on a motor without amplitude control it can only
+     *  shorten the pulse; with control, amplitude does the work instead. */
+    private fun scaleOn(on: Float): Float =
+        if (amplitudeControl) on else (on * (0.35f + 0.65f * settings.intensity)).coerceAtLeast(MIN_ON_MS.toFloat())
+
+    private fun event(s: HapticState, cfg: HapticSettings): Pattern? {
+        // A crash: a hard slam and a rough tail, longer the bigger the hit.
+        if (cfg.collision && s.impact >= IMPACT_FIRE && prevImpact < IMPACT_FIRE) {
+            val mag = ((s.impact - IMPACT_FIRE) / (1f - IMPACT_FIRE)).coerceIn(0f, 1f)
+            val slam = lerp(120f, 320f, mag).toLong()
+            return Pattern(longArrayOf(0, slam, 60, slam / 3, 60, slam / 4), floatArrayOf(0f, 1f, 0f, 0.7f, 0f, 0.5f), -1)
+        }
+        // Shifting with the clutch up: a long crunch.
+        if (cfg.grind && s.shiftHeld && !prevShift && s.clutch01 < CLUTCH_DISENGAGE) {
+            return Pattern(longArrayOf(0, 70, 25, 70, 25, 90), floatArrayOf(0f, 1f, 0f, 1f, 0f, 1f), -1)
+        }
+        // A gear going in: two firm knocks.
+        if (cfg.shift && prevGear != Int.MIN_VALUE && s.gear != prevGear) {
+            return Pattern(longArrayOf(0, scaleOn(45f).toLong(), 55, scaleOn(35f).toLong()), floatArrayOf(0f, 1f, 0f, 0.8f), -1)
+        }
+        // The engine catching: the starter's rattle. BeamNG reports 0 rpm
+        // until it fires, so it's the 0 -> running edge.
+        if (cfg.ignition && prevRpm < ENGINE_MIN_RPM && s.rpm >= ENGINE_MIN_RPM && prevGear != Int.MIN_VALUE) {
+            val t = mutableListOf(0L)
+            val l = mutableListOf(0f)
+            repeat(4) { t += 70; l += 0.9f; t += 60; l += 0f }
+            return Pattern(t.toLongArray(), l.toFloatArray(), -1)
+        }
+        return null
+    }
+
+    private fun lerp(a: Float, b: Float, t: Float) = a + (b - a) * t
+
+    companion object {
+        const val STEPS = 5
+        const val FLOOR = 0.04f         // below this, nothing to feel
+        const val DECAY = 6f            // per second: a spike to 1 lasts ~150 ms
+        const val SETTLE_MS = 90L       // easing off has to hold this long
+        const val MIN_ON_MS = 8L        // shorter, and the motor barely spins up
+        const val MIN_GAP_MS = 18L
+        const val LOCKUP_GAIN = 7f      // BeamNG's brake trigger: a full lock-up is ~0.14
+        const val WHEELSPIN_GAIN = 4f   // BeamNG's throttle trigger: a hard spin is ~0.2
+        const val ENGINE_MIN_RPM = 60f
+        const val CLUTCH_DISENGAGE = 0.45f
+        const val SLIP_MIN = 0.035f     // ~3 degrees sideways
+        const val SLIP_FULL = 0.4f      // ~36 degrees, fully sideways
+        const val IMPACT_FIRE = 0.12f
+    }
+}
+
+/** Runs the [HapticMixer] ~60 times a second and drives the motor with it. */
+class HapticsEngine(context: Context, private val provider: () -> HapticState) {
+
+    private val vibrator: Vibrator? = resolveVibrator(context)?.takeIf { it.hasVibrator() }
+    private val amplitudeControl = vibrator?.hasAmplitudeControl() == true
+    private val mixer = HapticMixer(amplitudeControl)
+
+    @Volatile var settings = HapticSettings()
+
+    @Volatile private var running = false
+    private var thread: Thread? = null
 
     fun start() {
         if (running || vibrator == null) return
@@ -53,13 +286,13 @@ class HapticsEngine(context: Context, private val provider: () -> HapticState) {
     }
 
     private fun loop() {
-        var last = System.nanoTime()
         while (running) {
-            val now = System.nanoTime()
-            val dt = ((now - last) / 1e9f).coerceAtMost(0.1f)
-            last = now
             try {
-                tick(dt)
+                when (val c = mixer.update(provider(), settings, SystemClock.elapsedRealtime())) {
+                    is HapticCommand.Play -> play(c.pattern)
+                    HapticCommand.Stop -> vibrator?.cancel()
+                    null -> {}
+                }
             } catch (_: Exception) {
             }
             try {
@@ -68,147 +301,37 @@ class HapticsEngine(context: Context, private val provider: () -> HapticState) {
                 break
             }
         }
+        vibrator?.cancel()
     }
 
-    private fun tick(dt: Float) {
+    private fun play(p: Pattern) {
         val v = vibrator ?: return
-        val s = provider()
-        val cfg = settings
-
-        if (!cfg.enabled || !s.active) {
-            prevGear = s.gear; prevShift = s.shiftHeld; prevImpact = s.impact
-            prevRpm = s.rpm; pulseTimer = 0f
-            return
-        }
-        val master = cfg.intensity.coerceIn(0f, 1f)
-        val nowMs = System.currentTimeMillis()
-        var playedDiscrete = false
-
-        // --- Crash: a big jolt the moment an impact spike lands. ---
-        if (cfg.collision && s.impact >= IMPACT_FIRE && prevImpact < IMPACT_FIRE) {
-            val mag = ((s.impact - IMPACT_FIRE) / (1f - IMPACT_FIRE)).coerceIn(0f, 1f)
-            val dur = lerp(110f, 360f, mag).toLong()
-            // Hard slam plus a short rough tail, scaled by how big the hit was.
-            waveform(
-                v,
-                longArrayOf(0, dur, 20, (dur / 3)),
-                intArrayOf(0, amp(1f, master), 0, amp(0.6f + 0.4f * mag, master)),
-            )
-            pulseTimer = (dur + dur / 3 + 20) / 1000f // let the crash ring out
-            prevGear = s.gear; prevShift = s.shiftHeld; prevImpact = s.impact
-            prevRpm = s.rpm
-            return
-        }
-
-        // --- Grind: a shift action begins while the clutch pedal is up. ---
-        val shiftEdge = s.shiftHeld && !prevShift
-        if (cfg.grind && shiftEdge && s.clutch01 < CLUTCH_DISENGAGE) {
-            oneShot(v, 200, amp(1.0f, master)) // long crunch
-            grindUntilMs = nowMs + 280
-            playedDiscrete = true
-        }
-
-        // --- Gear change: a hard double-knock, like a gear slamming home. ---
-        val gearChanged = prevGear != Int.MIN_VALUE && s.gear != prevGear
-        if (!playedDiscrete && cfg.shift && gearChanged && nowMs > grindUntilMs) {
-            waveform(v, longArrayOf(0, 60, 30, 55), intArrayOf(0, amp(1f, master), 0, amp(0.85f, master)))
-            playedDiscrete = true
-        }
-
-        // --- Ignition: a starter rattle the moment the engine comes to life.
-        // BeamNG often reports rpm=0 until it catches, then jumps to idle, so we
-        // fire on that 0 -> alive edge instead of relying on a cranking rpm band.
-        if (!playedDiscrete && cfg.ignition && prevRpm < ENGINE_MIN_RPM && s.rpm >= ENGINE_MIN_RPM) {
-            waveform(
-                v,
-                longArrayOf(0, 125, 75, 125, 75, 125, 75, 150),
-                intArrayOf(
-                    0, amp(0.85f, master), 0, amp(0.9f, master),
-                    0, amp(0.85f, master), 0, amp(1f, master),
-                ),
-            )
-            pulseTimer = 0.9f
-            playedDiscrete = true
-        }
-
-        // --- Drift pulse: ragged rumble while sliding, scaled by how sideways. ---
-        pulseTimer -= dt
-        val drifting = cfg.drift && s.slip > SLIP_MIN
-        if (!playedDiscrete && drifting && pulseTimer <= 0f) {
-            val driftAmount = ((s.slip - SLIP_MIN) / (SLIP_FULL - SLIP_MIN)).coerceIn(0f, 1f)
-            // Light slide -> barely there; fully sideways -> hard and ragged.
-            val amplitude = lerp(0.18f, 1.0f, driftAmount) * (0.85f + Random.nextFloat() * 0.3f)
-            oneShot(v, 18, amp(amplitude, master))
-            pulseTimer = lerp(0.10f, 0.035f, driftAmount)
-        } else if (!drifting) {
-            pulseTimer = 0f // ready to pulse the instant a slide starts
-        }
-
-        prevGear = s.gear
-        prevShift = s.shiftHeld
-        prevImpact = s.impact
-        prevRpm = s.rpm
-    }
-
-    private fun oneShot(v: Vibrator, ms: Long, amplitude: Int) {
-        val a = if (hasAmplitude) amplitude else VibrationEffect.DEFAULT_AMPLITUDE
-        v.vibrate(VibrationEffect.createOneShot(ms, a))
-    }
-
-    /** A multi-step pattern. `timings` start with an off gap; `amplitudes` are
-     *  honored only on devices with amplitude control, else it's on/off. */
-    private fun waveform(v: Vibrator, timings: LongArray, amplitudes: IntArray) {
-        val effect = if (hasAmplitude) {
-            VibrationEffect.createWaveform(timings, amplitudes, -1)
+        val effect = if (amplitudeControl) {
+            val master = settings.intensity.coerceIn(0f, 1f)
+            val amps = IntArray(p.levels.size) { i ->
+                if (p.levels[i] <= 0f) 0 else (p.levels[i] * master * 255f).toInt().coerceIn(1, 255)
+            }
+            VibrationEffect.createWaveform(p.timings, amps, p.repeat)
         } else {
-            VibrationEffect.createWaveform(timings, -1)
+            VibrationEffect.createWaveform(p.timings, p.repeat)
         }
-        v.vibrate(effect)
+        // A game is media, not touch feedback: it follows the media vibration
+        // setting and isn't muted with keyboard / touch haptics.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            v.vibrate(effect, VibrationAttributes.createForUsage(VibrationAttributes.USAGE_MEDIA))
+        } else {
+            @Suppress("DEPRECATION")
+            v.vibrate(effect, AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_GAME).build())
+        }
     }
-
-    /** level 0..1 scaled by the master intensity, clamped to a usable 1..255. */
-    private fun amp(level: Float, master: Float): Int =
-        (level.coerceIn(0f, 1f) * master * 255f).toInt().coerceIn(1, 255)
-
-    private fun lerp(a: Float, b: Float, t: Float) = a + (b - a) * t
 
     private companion object {
-        const val ENGINE_MIN_RPM = 60f   // engine considered alive above this
-        const val CLUTCH_DISENGAGE = 0.45f // pedal must be this pressed to shift clean
-        const val SLIP_MIN = 0.035f  // slip fraction where a slide starts to register (~3 deg)
-        const val SLIP_FULL = 0.4f   // slip fraction felt as "fully sideways" (~36 deg)
-        const val IMPACT_FIRE = 0.12f // crash strength that triggers the jolt
-
         fun resolveVibrator(context: Context): Vibrator? =
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                (context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager)
-                    ?.defaultVibrator
+                (context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager)?.defaultVibrator
             } else {
                 @Suppress("DEPRECATION")
                 context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
             }
     }
 }
-
-/** On/off + tuning for each feedback channel, mirrored from [Config]. */
-data class HapticSettings(
-    val enabled: Boolean = true,
-    val intensity: Float = 1f,     // master 0..1
-    val ignition: Boolean = true,  // starter rattle when the engine catches
-    val shift: Boolean = true,     // hard knock on gear change
-    val grind: Boolean = true,     // harsh buzz shifting without clutch
-    val drift: Boolean = true,     // hard ragged rumble while sliding (real slip)
-    val collision: Boolean = true, // big jolt on impact
-)
-
-/** Everything the engine needs to decide what to play, sampled each tick. */
-data class HapticState(
-    val active: Boolean,    // connected; telemetry expected to flow
-    val rpm: Float,
-    val gear: Int,
-    val clutch01: Float,    // clutch pedal 0..1 (phone-local); 1 = fully pressed
-    val throttle01: Float,  // throttle pedal 0..1 (phone-local)
-    val shiftHeld: Boolean, // any shift-flagged button currently pressed
-    val slip: Float,        // 0..1 real sideways slide, from MotionSim
-    val impact: Float,      // 0..1 crash strength, decaying, from MotionSim
-)

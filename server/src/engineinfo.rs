@@ -3,8 +3,11 @@
 //! OutGauge carries the rpm but not the range, so without help the tach has
 //! to infer the redline from how the engine behaves ([crate::server] does that
 //! as a fallback). The mod in `beamng/` adds a protocol that sends the range
-//! BeamNG's own tacho apps use: idle rpm and the rev limiter, a few times a
-//! second, to UDP 4446. 12 bytes, little-endian, header "CE" + version 1.
+//! BeamNG's own tacho apps use: idle rpm and the rev limiter, to UDP 4446.
+//! Version 2 adds what BeamNG would make a gamepad feel - its haptics.lua
+//! channels (main rumble, throttle trigger, brake trigger) and ABS - 30 times
+//! a second, so the phone vibrates the way a controller does in the game.
+//! Little-endian, header "CE" + version: 12 bytes for v1, 24 for v2.
 //!
 //! The protocol travels inside DotDash, the dashboard UI apps for BeamNG
 //! (github.com/Tudor077/beamng-dotdash). CorsaConnect carries DotDash's
@@ -24,17 +27,54 @@ pub struct EngineInfo {
     pub max_rpm: f32,
     /// The engine cuts at `max_rpm`; without one it's just where power ends.
     pub rev_limiter: bool,
+    /// From v2 on.
+    pub haptics: Option<Haptics>,
 }
 
-/// Parse a packet, or `None` if it isn't one of ours (or carries no range yet).
+/// BeamNG's gamepad vibration, as its haptics.lua computes it. All 0..1.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Haptics {
+    /// The main motor: jerk (bumps, kerbs, hits) plus tyre slip energy.
+    pub rumble: f32,
+    /// The throttle trigger: powered wheels spinning.
+    pub wheelspin: f32,
+    /// The brake trigger: wheels locked under braking (not while ABS works).
+    pub lockup: f32,
+    /// ABS is working right now.
+    pub abs: bool,
+}
+
+impl EngineInfo {
+    /// The rev limiter, if the car has an rpm range at all. An electric car or
+    /// a vehicle still spawning reports 0.
+    pub fn range(&self) -> Option<f32> {
+        (self.max_rpm.is_finite() && self.max_rpm > 500.0).then_some(self.max_rpm)
+    }
+}
+
+/// Parse a packet, or `None` if it isn't one of ours, or says nothing yet
+/// (a v1 packet with no range).
 pub fn parse(buf: &[u8]) -> Option<EngineInfo> {
-    if buf.len() < 12 || &buf[0..2] != b"CE" || buf[2] != 1 {
+    if buf.len() < 12 || &buf[0..2] != b"CE" {
         return None;
     }
     let f = |off: usize| f32::from_le_bytes(buf[off..off + 4].try_into().unwrap());
-    let info = EngineInfo { idle_rpm: f(4), max_rpm: f(8), rev_limiter: buf[3] & 1 != 0 };
-    // An electric car or a vehicle still spawning reports 0; that's no range.
-    (info.max_rpm.is_finite() && info.max_rpm > 500.0).then_some(info)
+    let unit = |off: usize| {
+        let x = f(off);
+        if x.is_finite() { x.clamp(0.0, 1.0) } else { 0.0 }
+    };
+    let haptics = match buf[2] {
+        1 => None,
+        2 if buf.len() >= 24 => Some(Haptics {
+            rumble: unit(12),
+            wheelspin: unit(16),
+            lockup: unit(20),
+            abs: buf[3] & 2 != 0,
+        }),
+        _ => return None,
+    };
+    let info = EngineInfo { idle_rpm: f(4), max_rpm: f(8), rev_limiter: buf[3] & 1 != 0, haptics };
+    (info.range().is_some() || haptics.is_some()).then_some(info)
 }
 
 /// The protocol as it is in the repo. DotDash carries a copy of this file.
@@ -170,19 +210,45 @@ mod tests {
         b
     }
 
+    fn packet_v2(flags: u8, idle: f32, max: f32, rumble: f32, spin: f32, lock: f32) -> Vec<u8> {
+        let mut b = packet(flags, idle, max);
+        b[2] = 2;
+        for x in [rumble, spin, lock] {
+            b.extend_from_slice(&x.to_le_bytes());
+        }
+        b
+    }
+
     #[test]
     fn reads_what_the_mod_sends() {
         let info = parse(&packet(1, 850.0, 7200.0)).unwrap();
-        assert_eq!(info, EngineInfo { idle_rpm: 850.0, max_rpm: 7200.0, rev_limiter: true });
+        assert_eq!(info, EngineInfo { idle_rpm: 850.0, max_rpm: 7200.0, rev_limiter: true, haptics: None });
+    }
+
+    #[test]
+    fn reads_the_haptics_of_v2() {
+        let info = parse(&packet_v2(0b11, 850.0, 7200.0, 0.5, 0.2, 0.07)).unwrap();
+        assert_eq!(info.range(), Some(7200.0));
+        assert_eq!(info.haptics, Some(Haptics { rumble: 0.5, wheelspin: 0.2, lockup: 0.07, abs: true }));
+        // An electric car: no range, but the haptics still count.
+        let ev = parse(&packet_v2(0, 0.0, 0.0, 0.3, 0.0, 0.0)).unwrap();
+        assert_eq!((ev.range(), ev.haptics.map(|h| h.rumble)), (None, Some(0.3)));
+        // Garbage is clamped, not passed on.
+        let odd = parse(&packet_v2(0, 850.0, 7200.0, f32::NAN, 7.0, -1.0)).unwrap().haptics.unwrap();
+        assert_eq!((odd.rumble, odd.wheelspin, odd.lockup), (0.0, 1.0, 0.0));
     }
 
     #[test]
     fn ignores_other_traffic_and_empty_ranges() {
         assert!(parse(b"BNG1 something else entirely").is_none());
         assert!(parse(&packet(0, 0.0, 0.0)).is_none());
-        let mut v2 = packet(1, 850.0, 7200.0);
-        v2[2] = 2;
-        assert!(parse(&v2).is_none());
+        let mut v3 = packet(1, 850.0, 7200.0);
+        v3[2] = 3;
+        assert!(parse(&v3).is_none());
+        // v2 cut short.
+        let mut short = packet(1, 850.0, 7200.0);
+        short[2] = 2;
+        assert!(parse(&short).is_none());
     }
 
     fn scratch(tag: &str) -> PathBuf {
@@ -235,10 +301,11 @@ mod tests {
     #[test]
     fn lua_struct_matches_the_parser() {
         for field in ["char          magic[2];", "unsigned char version;", "unsigned char flags;",
-                      "float         idleRpm;", "float         maxRpm;"] {
+                      "float         idleRpm;", "float         maxRpm;", "float         rumble;",
+                      "float         wheelspin;", "float         lockup;"] {
             assert!(MOD_LUA.contains(field), "mod struct changed: {field}");
         }
         assert!(MOD_LUA.contains("local PORT = 4446"));
-        assert!(MOD_LUA.contains("o.magic = \"CE\"") && MOD_LUA.contains("o.version = 1"));
+        assert!(MOD_LUA.contains("o.magic = \"CE\"") && MOD_LUA.contains("o.version = 2"));
     }
 }

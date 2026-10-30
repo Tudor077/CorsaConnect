@@ -27,6 +27,8 @@ const MOTIONSIM_PORT: u16 = 4445;
 /// How long the phone driving has to be silent before another phone may take
 /// over. Input arrives ~100 times a second, so this is a phone that's gone.
 const PHONE_TAKEOVER: Duration = Duration::from_secs(3);
+/// The mod sends haptics 30 times a second; older than this, stop playing them.
+const HAPTICS_STALE: Duration = Duration::from_millis(250);
 /// The BeamNG mod sends 4 times a second; this much silence means it stopped.
 const ENGINE_INFO_STALE: Duration = Duration::from_secs(2);
 /// How long a crash spike keeps fading after it lands.
@@ -133,6 +135,13 @@ impl Shared {
     fn engine_info(&self) -> Option<EngineInfo> {
         let e = self.engine.lock().unwrap();
         e.filter(|(_, at)| at.elapsed() < ENGINE_INFO_STALE).map(|(info, _)| info)
+    }
+
+    /// BeamNG's gamepad vibration from the mod, if it's live. Much stricter
+    /// than [Self::engine_info]: a rumble that's 2 s old must not keep playing.
+    fn haptics(&self) -> Option<engineinfo::Haptics> {
+        let e = self.engine.lock().unwrap();
+        e.filter(|(_, at)| at.elapsed() < HAPTICS_STALE).and_then(|(info, _)| info.haptics)
     }
 
     pub fn log(&self, msg: impl Into<String>) {
@@ -756,7 +765,7 @@ fn telemetry_relay(shared: Arc<Shared>, stop: Arc<AtomicBool>, link: Arc<PhoneLi
         if let (Some(found), None) = (found, from_mod) {
             shared.log(format!("Redline found: {found:.0} rpm."));
         }
-        let limiter = from_mod.map_or(finder.limiter, |e| e.max_rpm);
+        let limiter = from_mod.and_then(|e| e.range()).unwrap_or(finder.limiter);
 
         // Big gauge with no red until the limiter is known; then shrink to it.
         if limiter > 0.0 {
@@ -767,7 +776,16 @@ fn telemetry_relay(shared: Arc<Shared>, stop: Arc<AtomicBool>, link: Arc<PhoneLi
             tel.redline = tel.max_rpm;
         }
         let packet = tel.encode();
-        link.send(&packet);
+        // The phone also gets BeamNG's own gamepad vibration, appended. The
+        // mirror doesn't: PicoPanel reads exactly the 86-byte packet.
+        match shared.haptics() {
+            Some(h) => {
+                let mut with_haptics = packet.clone();
+                with_haptics.extend_from_slice(&crate::protocol::haptics_block(&h));
+                link.send(&with_haptics);
+            }
+            None => link.send(&packet),
+        }
         // Sent whether or not a phone is connected: the mirror is a separate
         // consumer and shouldn't depend on the phone being up.
         shared.send_mirror(&tx, &packet);
@@ -945,21 +963,38 @@ fn engine_listen_on(sock: UdpSocket, shared: Arc<Shared>, stop: Arc<AtomicBool>)
         return;
     }
     let mut buf = [0u8; 64];
-    let mut last: Option<EngineInfo> = None;
+    // What was last logged: the range (changes with the car), and whether
+    // haptics come with it. The haptics themselves change 30 times a second.
+    let mut last_range: Option<(Option<f32>, f32, bool)> = None;
+    let mut told_haptics = false;
     while !stop.load(Ordering::Relaxed) {
         let fresh = shared.engine_info().is_some();
         shared.set_status(|s| s.engine = fresh);
         let Ok((n, _)) = sock.recv_from(&mut buf) else { continue };
         let Some(info) = engineinfo::parse(&buf[..n]) else { continue };
         *shared.engine.lock().unwrap() = Some((info, Instant::now()));
-        if last != Some(info) {
-            shared.log(format!(
-                "DotDash: rev range {:.0}-{:.0} rpm{}.",
-                info.idle_rpm,
-                info.max_rpm,
-                if info.rev_limiter { "" } else { " (no rev limiter)" }
-            ));
-            last = Some(info);
+        let range = (info.range(), info.idle_rpm, info.rev_limiter);
+        if last_range != Some(range) {
+            shared.log(match info.range() {
+                Some(max) => format!(
+                    "DotDash: rev range {:.0}-{max:.0} rpm{}.",
+                    info.idle_rpm,
+                    if info.rev_limiter { "" } else { " (no rev limiter)" }
+                ),
+                None => "DotDash: this car has no rpm range (electric?).".to_string(),
+            });
+            last_range = Some(range);
+        }
+        if !told_haptics {
+            // Said once either way: an old DotDash (before 1.3) still gives the
+            // rev range, and silently no vibration - which looks like a bug.
+            shared.log(if info.haptics.is_some() {
+                "DotDash: BeamNG's controller vibration goes to the phone."
+            } else {
+                "DotDash is older than 1.3: rev range only, no vibration from BeamNG. Update DotDash \
+                 (and check no older copy is still in BeamNG's mods\\repo folder)."
+            });
+            told_haptics = true;
         }
     }
     shared.set_status(|s| s.engine = false);

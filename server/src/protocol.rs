@@ -86,6 +86,23 @@ impl InputPacket {
     }
 }
 
+/// Marks the haptics block appended to a telemetry packet for the phone.
+pub const HAPTICS_MAGIC: &[u8; 2] = b"HB";
+
+/// BeamNG's gamepad vibration (see [crate::engineinfo::Haptics]) as the 15
+/// bytes appended to the phone's telemetry packet: "HB", flags (bit 0: ABS
+/// working), then rumble, wheelspin and lockup as f32 0..1. Phones before
+/// 0.8.0 read the first 86 bytes and never see it.
+pub fn haptics_block(h: &crate::engineinfo::Haptics) -> [u8; 15] {
+    let mut b = [0u8; 15];
+    b[0..2].copy_from_slice(HAPTICS_MAGIC);
+    b[2] = h.abs as u8;
+    b[3..7].copy_from_slice(&h.rumble.to_le_bytes());
+    b[7..11].copy_from_slice(&h.wheelspin.to_le_bytes());
+    b[11..15].copy_from_slice(&h.lockup.to_le_bytes());
+    b
+}
+
 /// Telemetry we forward to the phone after parsing OutGauge.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TelemetryPacket {
