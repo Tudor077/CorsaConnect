@@ -128,7 +128,7 @@ class HapticMixer(private val amplitudeControl: Boolean) {
         }
 
         // --- Events: they cut in, and the texture comes back after. ---
-        event(s, cfg)?.let { p ->
+        event(s, cfg, eventPlaying = nowMs < eventUntilMs)?.let { p ->
             remember(s)
             eventUntilMs = nowMs + p.durationMs
             playing = null // re-issue the texture when the event is over
@@ -215,13 +215,18 @@ class HapticMixer(private val amplitudeControl: Boolean) {
     private fun scaleOn(on: Float): Float =
         if (amplitudeControl) on else (on * (0.35f + 0.65f * settings.intensity)).coerceAtLeast(MIN_ON_MS.toFloat())
 
-    private fun event(s: HapticState, cfg: HapticSettings): Pattern? {
+    /** An event to play now, if one just happened. While one is still
+     *  playing only a crash may cut in: shifting without the clutch fires the
+     *  crunch and then the gear change a frame later, and the knock used to
+     *  cancel the crunch 20-40 ms in, so it was never felt. */
+    private fun event(s: HapticState, cfg: HapticSettings, eventPlaying: Boolean): Pattern? {
         // A crash: a hard slam and a rough tail, longer the bigger the hit.
         if (cfg.collision && s.impact >= IMPACT_FIRE && prevImpact < IMPACT_FIRE) {
             val mag = ((s.impact - IMPACT_FIRE) / (1f - IMPACT_FIRE)).coerceIn(0f, 1f)
             val slam = lerp(120f, 320f, mag).toLong()
             return Pattern(longArrayOf(0, slam, 60, slam / 3, 60, slam / 4), floatArrayOf(0f, 1f, 0f, 0.7f, 0f, 0.5f), -1)
         }
+        if (eventPlaying) return null
         // Shifting with the clutch up: a long crunch.
         if (cfg.grind && s.shiftHeld && !prevShift && s.clutch01 < CLUTCH_DISENGAGE) {
             return Pattern(longArrayOf(0, 70, 25, 70, 25, 90), floatArrayOf(0f, 1f, 0f, 1f, 0f, 1f), -1)

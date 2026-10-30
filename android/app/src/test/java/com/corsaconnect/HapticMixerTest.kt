@@ -81,6 +81,23 @@ class HapticMixerTest {
         assertTrue("road resumes after the knock, ${back} ms", back >= (knock.second as HapticCommand.Play).pattern.durationMs)
     }
 
+    @Test fun theGearKnockDoesNotCutTheCrunchShort() {
+        // Shift pressed with the clutch up at frame 10, the gear changes at 11:
+        // exactly what the phone's history showed in BeamNG.
+        val m = HapticMixer(false)
+        val cmds = run(m, 60) { i -> state(beam(), gear = if (i < 11) 3 else 4, shift = i in 10..14, clutch = 0f) }
+        val events = cmds.map { (it.second as HapticCommand.Play).pattern }.filter { it.repeat == -1 }
+        assertEquals("only the crunch", 1, events.size)
+        assertEquals(longArrayOf(0, 70, 25, 70, 25, 90).toList(), events[0].timings.toList())
+    }
+
+    @Test fun aCrashStillCutsIntoAnEvent() {
+        val m = HapticMixer(false)
+        val cmds = run(m, 30) { i -> state(gear = if (i < 5) 3 else 4, impact = if (i >= 7) 0.9f else 0f) }
+        assertEquals("knock, then the crash", 2, plays(cmds))
+        assertTrue((cmds[1].second as HapticCommand.Play).pattern.timings[1] >= 200)
+    }
+
     @Test fun theSlideEstimateOnlyStandsInWithoutBeamNG() {
         val withBeam = run(HapticMixer(false), 20) { state(beam(), slip = 0.3f) }
         assertTrue("BeamNG says calm: nothing", withBeam.isEmpty())
